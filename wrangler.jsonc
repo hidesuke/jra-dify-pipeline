@@ -1,0 +1,25 @@
+{
+  "name": "jra-dify-pipeline",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "triggers": {
+    "crons": [
+      "0 8 * * 5", // 金曜 17:00 JST
+      "0 8 * * 6"  // 土曜 17:00 JST
+    ]
+  },
+  "queues": {
+    "producers": [
+      { "binding": "RACE_QUEUE", "queue": "jra-race-queue" }
+    ],
+    "consumers": [
+      {
+        "queue": "jra-race-queue",
+        "max_batch_size": 1,        // 1メッセージずつ処理
+        "max_batch_timeout": 5,
+        "max_retries": 3,           // 失敗時は3回まで自動リトライ
+        "max_concurrency": 2        // 同時実行数（Difyの許容負荷に合わせて1〜3程度）
+      }
+    ]
+  }
+}

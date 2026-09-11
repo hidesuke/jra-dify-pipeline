@@ -1,0 +1,19 @@
+{
+  "name": "jra-dify-pipeline",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Worker that enqueues JRA race URLs and triggers a Dify workflow",
+  "scripts": {
+    "dev": "wrangler dev",
+    "start": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "cf-typegen": "wrangler types"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.131.0"
+  }
+}
