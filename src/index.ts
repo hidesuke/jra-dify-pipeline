@@ -19,27 +19,23 @@ export interface RaceMessage {
 // ---------------------------------------------------------
 // 競馬場オフセット & URL生成ロジック
 // ---------------------------------------------------------
-const VENUE_OFFSETS: Record<string, number> = {
-  "01": 0xF8, // 札幌
-  "02": 0x43, // 函館
-  "03": 0x8E, // 福島
-  "04": 0xD9, // 新潟
-  "05": 0x24, // 東京
-  "06": 0x6F, // 中山
-  "07": 0xBA, // 中京
-  "08": 0x05, // 京都
-  "09": 0x50, // 阪神
-  "10": 0x9B  // 小倉
-};
-
-export function calculateInitialChecksum(venueCode: string, kai: number, nichi: number): number {
-  const base = VENUE_OFFSETS[venueCode] ?? 0x6F;
-  return (base + (nichi - 1) * 0x30 + (kai - 1) * 0x1B) % 256;
+// 1R のチェックサム。場は 0x4A 刻み。日は十進2桁を BCD（12日 → 0x12）として加算する。
+// 月は提供サンプルがすべて 9 月のため未検証。
+export function calculateInitialChecksum(
+  venueCode: string,
+  kai: number,
+  nichi: number,
+  dateStrCompact: string
+): number {
+  const venue = Number(venueCode);
+  const day = Number(dateStrCompact.slice(6, 8));
+  const dayBcd = ((Math.floor(day / 10) << 4) | (day % 10)) & 0xff;
+  return (venue * 0x4A + kai * 0x75 + nichi * 0x95 + dayBcd * 0x9B + 0x16) % 256;
 }
 
 export function generateRaceUrls(item: ScheduleItem, dateStrCompact: string, prefix = "pw01dde01") {
   const header = `${prefix}${item.venueCode}${item.year.toString().padStart(4, "0")}${item.kai.toString().padStart(2, "0")}${item.nichi.toString().padStart(2, "0")}`;
-  let currentCode = calculateInitialChecksum(item.venueCode, item.kai, item.nichi);
+  let currentCode = calculateInitialChecksum(item.venueCode, item.kai, item.nichi, dateStrCompact);
   const results: { raceNo: number; url: string }[] = [];
 
   for (let r = 1; r <= 12; r++) {
@@ -103,7 +99,7 @@ export default {
   async queue(batch: MessageBatch<RaceMessage>, env: Env): Promise<void> {
     for (const msg of batch.messages) {
       const { targetDate, venueCode, raceNo, raceUrl } = msg.body;
-      console.log(`Executing Dify API: ${targetDate} 場:${venueCode} ${raceNo}R`);
+      console.log(`Executing Dify API: ${targetDate} 場:${venueCode} ${raceNo}R ${raceUrl}`);
 
       try {
         const res = await fetch(env.DIFY_API_URL, {
@@ -114,11 +110,10 @@ export default {
           },
           body: JSON.stringify({
             inputs: {
-              race_url: raceUrl,
-              target_date: targetDate,
-              venue_code: venueCode,
-              race_number: raceNo
+              url: raceUrl,
+              remarks: `${targetDate} 場:${venueCode} ${raceNo}R`
             },
+            query: `${targetDate} 場:${venueCode} ${raceNo}R`,
             response_mode: "blocking",
             user: "cloudflare-queue-worker"
           })
@@ -137,31 +132,52 @@ export default {
     }
   },
 
-  // 3. 手動テスト用エンドポイント（例: /?date=2026-09-12）
+  // 3. 手動テスト用（例: /?date=2026-09-12&venue=06&race=1）
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
     const targetDateKey = url.searchParams.get("date") || "2026-09-12";
+    const venueFilter = url.searchParams.get("venue");
+    const raceFilter = url.searchParams.get("race");
     const schedules = getSchedulesForDate(targetDateKey);
 
     if (!schedules) {
       return new Response(`No schedule found for date: ${targetDateKey}`, { status: 404 });
     }
 
+    const selected = venueFilter
+      ? schedules.filter(s => s.venueCode === venueFilter)
+      : schedules;
+    if (selected.length === 0) {
+      return new Response(`No venue ${venueFilter} on ${targetDateKey}`, { status: 404 });
+    }
+
+    const raceNo = raceFilter ? Number(raceFilter) : undefined;
+    if (raceFilter && (!Number.isInteger(raceNo) || raceNo! < 1 || raceNo! > 12)) {
+      return new Response(`Invalid race: ${raceFilter}`, { status: 400 });
+    }
+
     const dateCompact = targetDateKey.replace(/-/g, "");
     const prefix = env.PREFIX_CODE || "pw01dde01";
 
-    const messages = schedules.flatMap(s =>
-      generateRaceUrls(s, dateCompact, prefix).map(r => ({
-        body: {
-          targetDate: targetDateKey,
-          venueCode: s.venueCode,
-          raceNo: r.raceNo,
-          raceUrl: r.url
-        }
-      }))
+    const messages = selected.flatMap(s =>
+      generateRaceUrls(s, dateCompact, prefix)
+        .filter(r => raceNo === undefined || r.raceNo === raceNo)
+        .map(r => ({
+          body: {
+            targetDate: targetDateKey,
+            venueCode: s.venueCode,
+            raceNo: r.raceNo,
+            raceUrl: r.url
+          }
+        }))
     );
 
+    if (messages.length === 0) {
+      return new Response(`No races matched for ${targetDateKey}`, { status: 404 });
+    }
+
     await env.RACE_QUEUE.sendBatch(messages);
-    return new Response(`Enqueued ${messages.length} races for ${targetDateKey} successfully.`, { status: 200 });
+    const preview = messages.map(m => `${m.body.venueCode}:${m.body.raceNo}R ${m.body.raceUrl}`).join("\n");
+    return new Response(`Enqueued ${messages.length} races for ${targetDateKey}\n${preview}\n`, { status: 200 });
   }
 };
