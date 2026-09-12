@@ -4,8 +4,9 @@
   "compatibility_date": "2026-09-01",
   "triggers": {
     "crons": [
-      "0 8 * * 5", // 金曜 17:00 JST
-      "0 8 * * 6"  // 土曜 17:00 JST
+      // Cloudflare の曜日は 1=日 … 7=土。数字の 5/6 は木/金になるので FRI/SAT を使う
+      "0 8 * * FRI", // 金曜 17:00 JST
+      "0 8 * * SAT"  // 土曜 17:00 JST
     ]
   },
   "queues": {

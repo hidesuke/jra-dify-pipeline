@@ -1,3 +1,4 @@
+import { authorizePredict } from "./access";
 import { getSchedulesForDate, type ScheduleItem } from "./schedules";
 
 export type { ScheduleItem };
@@ -7,6 +8,20 @@ export interface Env {
   DIFY_API_URL: string;
   PREFIX_CODE?: string;
   RACE_QUEUE: Queue<RaceMessage>;
+  CF_ACCESS_TEAM_DOMAIN?: string;
+  CF_ACCESS_AUD?: string;
+  CF_ACCESS_ALLOWED_EMAIL?: string;
+  PREDICT_SECRET?: string;
+}
+
+/** JST の暦日。extraDays=1 なら JST の翌日 */
+export function jstDateKey(now = new Date(), extraDays = 0): string {
+  const t = new Date(now.getTime() + 9 * 60 * 60 * 1000);
+  t.setUTCDate(t.getUTCDate() + extraDays);
+  const y = t.getUTCFullYear();
+  const m = String(t.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(t.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
 }
 
 export interface RaceMessage {
@@ -59,13 +74,8 @@ export function generateRaceUrls(item: ScheduleItem, dateStrCompact: string, pre
 export default {
   // 1. Cron Trigger: 翌日分のレースを Queue に送信
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    const now = new Date();
-    // UTCからJST(+9h)へ変換し、翌日(+24h)を指定 -> 合計 +33h
-    const targetTime = new Date(now.getTime() + 33 * 60 * 60 * 1000);
-    const yyyy = targetTime.getUTCFullYear();
-    const mm = String(targetTime.getUTCMonth() + 1).padStart(2, "0");
-    const dd = String(targetTime.getUTCDate()).padStart(2, "0");
-    const targetDateKey = `${yyyy}-${mm}-${dd}`;
+    const targetDateKey = jstDateKey(new Date(), 1);
+    console.log(`Cron ${controller.cron} target=${targetDateKey}`);
 
     const schedules = getSchedulesForDate(targetDateKey);
     if (!schedules || schedules.length === 0) {
@@ -132,52 +142,94 @@ export default {
     }
   },
 
-  // 3. 手動テスト用（例: /?date=2026-09-12&venue=06&race=1）
-  async fetch(req: Request, env: Env): Promise<Response> {
+  // 3. GET / は馬柱 URL の一覧のみ。予想は GET|POST /run（認証必須）
+  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
-    const targetDateKey = url.searchParams.get("date") || "2026-09-12";
-    const venueFilter = url.searchParams.get("venue");
-    const raceFilter = url.searchParams.get("race");
-    const schedules = getSchedulesForDate(targetDateKey);
+    const path = url.pathname.replace(/\/+$/, "") || "/";
 
-    if (!schedules) {
-      return new Response(`No schedule found for date: ${targetDateKey}`, { status: 404 });
+    if (path === "/run") {
+      const denied = await authorizePredict(req, env, ctx);
+      if (denied) return denied;
+      return enqueueRaces(req, env);
     }
 
-    const selected = venueFilter
-      ? schedules.filter(s => s.venueCode === venueFilter)
-      : schedules;
-    if (selected.length === 0) {
-      return new Response(`No venue ${venueFilter} on ${targetDateKey}`, { status: 404 });
+    if (path !== "/") {
+      return new Response("Not found\n", { status: 404 });
     }
 
-    const raceNo = raceFilter ? Number(raceFilter) : undefined;
-    if (raceFilter && (!Number.isInteger(raceNo) || raceNo! < 1 || raceNo! > 12)) {
-      return new Response(`Invalid race: ${raceFilter}`, { status: 400 });
-    }
-
-    const dateCompact = targetDateKey.replace(/-/g, "");
-    const prefix = env.PREFIX_CODE || "pw01dde01";
-
-    const messages = selected.flatMap(s =>
-      generateRaceUrls(s, dateCompact, prefix)
-        .filter(r => raceNo === undefined || r.raceNo === raceNo)
-        .map(r => ({
-          body: {
-            targetDate: targetDateKey,
-            venueCode: s.venueCode,
-            raceNo: r.raceNo,
-            raceUrl: r.url
-          }
-        }))
-    );
-
-    if (messages.length === 0) {
-      return new Response(`No races matched for ${targetDateKey}`, { status: 404 });
-    }
-
-    await env.RACE_QUEUE.sendBatch(messages);
-    const preview = messages.map(m => `${m.body.venueCode}:${m.body.raceNo}R ${m.body.raceUrl}`).join("\n");
-    return new Response(`Enqueued ${messages.length} races for ${targetDateKey}\n${preview}\n`, { status: 200 });
+    return listRaceUrls(req, env);
   }
 };
+
+type RaceRow = { venueCode: string; raceNo: number; url: string };
+
+function resolveRaces(req: Request, env: Env): { error: Response } | { date: string; rows: RaceRow[] } {
+  const url = new URL(req.url);
+  const targetDateKey = url.searchParams.get("date") || jstDateKey();
+  const venueFilter = url.searchParams.get("venue");
+  const raceFilter = url.searchParams.get("race");
+  const schedules = getSchedulesForDate(targetDateKey);
+
+  if (!schedules) {
+    return { error: new Response(`No schedule found for date: ${targetDateKey}`, { status: 404 }) };
+  }
+
+  const selected = venueFilter
+    ? schedules.filter(s => s.venueCode === venueFilter)
+    : schedules;
+  if (selected.length === 0) {
+    return { error: new Response(`No venue ${venueFilter} on ${targetDateKey}`, { status: 404 }) };
+  }
+
+  const raceNo = raceFilter ? Number(raceFilter) : undefined;
+  if (raceFilter && (!Number.isInteger(raceNo) || raceNo! < 1 || raceNo! > 12)) {
+    return { error: new Response(`Invalid race: ${raceFilter}`, { status: 400 }) };
+  }
+
+  const dateCompact = targetDateKey.replace(/-/g, "");
+  const prefix = env.PREFIX_CODE || "pw01dde01";
+  const rows = selected.flatMap(s =>
+    generateRaceUrls(s, dateCompact, prefix)
+      .filter(r => raceNo === undefined || r.raceNo === raceNo)
+      .map(r => ({
+        venueCode: s.venueCode,
+        raceNo: r.raceNo,
+        url: r.url
+      }))
+  );
+
+  if (rows.length === 0) {
+    return { error: new Response(`No races matched for ${targetDateKey}`, { status: 404 }) };
+  }
+
+  return { date: targetDateKey, rows };
+}
+
+function listRaceUrls(req: Request, env: Env): Response {
+  const resolved = resolveRaces(req, env);
+  if ("error" in resolved) return resolved.error;
+
+  const body = `${resolved.rows.map((r) => r.url).join("\n")}\n`;
+  return new Response(body, {
+    status: 200,
+    headers: { "Content-Type": "text/plain; charset=utf-8" }
+  });
+}
+
+async function enqueueRaces(req: Request, env: Env): Promise<Response> {
+  const resolved = resolveRaces(req, env);
+  if ("error" in resolved) return resolved.error;
+
+  const messages = resolved.rows.map(r => ({
+    body: {
+      targetDate: resolved.date,
+      venueCode: r.venueCode,
+      raceNo: r.raceNo,
+      raceUrl: r.url
+    }
+  }));
+
+  await env.RACE_QUEUE.sendBatch(messages);
+  const preview = resolved.rows.map(r => `${r.venueCode}:${r.raceNo}R ${r.url}`).join("\n");
+  return new Response(`Enqueued ${messages.length} races for ${resolved.date}\n${preview}\n`, { status: 200 });
+}
