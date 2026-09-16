@@ -6,8 +6,17 @@
     // 検証済み Destination（ダッシュボードと同期。再デプロイで消えないように wrangler にも書く）
     "NOTIFY_EMAIL": "hidesuke@gmail.com",
     // Email Routing ドメイン上の From
-    "NOTIFY_FROM": "noreply@koumeinowana.info"
+    "NOTIFY_FROM": "noreply@koumeinowana.info",
+    // Cron メールに載せる /seed の origin
+    "PUBLIC_BASE_URL": "https://jra-dify-pipeline.hdsk.workers.dev"
   },
+  // チェックサム seed と 1R 失敗セッション。本番 id は `npx wrangler kv namespace create checksum-seed`
+  "kv_namespaces": [
+    {
+      "binding": "CHECKSUM_SEED",
+      "id": "checksum-seed-placeholder"
+    }
+  ],
   "send_email": [
     {
       // 検証済み Destination address 宛てに送信（自分宛通知）

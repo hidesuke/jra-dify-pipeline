@@ -41,7 +41,7 @@ function classifyRaceHtml(html) {
   };
 }
 
-function formatRaceUrlFailureEmail({ date, failures }) {
+function formatRaceUrlFailureEmail({ date, failures, seedFormUrl }) {
   const venues = failures.map((f) => f.venueCode).join(",");
   const subject = `[jra-dify-pipeline] 馬柱URLエラー ${date} 場:${venues}`;
   const lines = [
@@ -58,6 +58,16 @@ function formatRaceUrlFailureEmail({ date, failures }) {
     `該当場のレースはキュー投入をスキップしています。`,
     `開催表（src/schedules）の回次・日次や PREFIX_CODE を確認してください。`,
   ];
+  if (seedFormUrl) {
+    lines.splice(
+      lines.length - 2,
+      0,
+      ``,
+      `チェックサムのシードが変わった可能性がある場合は、次のページで失敗した場の正しい 1R URL を入力してください（Cloudflare Access で保護）。`,
+      seedFormUrl,
+      ``
+    );
+  }
   return { subject, text: lines.join("\n") };
 }
 
@@ -96,6 +106,7 @@ assert(
 
 const mail = formatRaceUrlFailureEmail({
   date: "2026-09-12",
+  seedFormUrl: "https://jra-dify-pipeline.hdsk.workers.dev/seed",
   failures: [
     {
       venueCode: "06",
@@ -114,6 +125,7 @@ assert(
 );
 assert(mail.text.includes(BAD_URL), "email body includes bad URL");
 assert(mail.text.includes("スキップ"), "email body mentions skip");
+assert(mail.text.includes("/seed"), "email body includes seed form link");
 
 // mock Cloudflare EMAIL.send
 {

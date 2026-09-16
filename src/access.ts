@@ -35,13 +35,27 @@ function getAccessJwt(req: Request): string | null {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
+/** `/run` と `/seed` など Access アプリが複数あるときはカンマ区切り */
+export function configuredAccessAuds(env: PredictAuthEnv): string[] {
+  return (env.CF_ACCESS_AUD ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function audMatches(payloadAud: string | string[] | undefined, allowed: string[]): boolean {
+  if (!payloadAud || allowed.length === 0) return false;
+  const presented = Array.isArray(payloadAud) ? payloadAud : [payloadAud];
+  return allowed.some((a) => presented.includes(a));
+}
+
 async function verifyAccessJwt(
   token: string,
   env: PredictAuthEnv
 ): Promise<{ email?: string } | null> {
   const team = env.CF_ACCESS_TEAM_DOMAIN?.replace(/\/$/, "");
-  const aud = env.CF_ACCESS_AUD?.trim();
-  if (!team || !aud) return null;
+  const allowedAuds = configuredAccessAuds(env);
+  if (!team || allowedAuds.length === 0) return null;
 
   const parts = token.split(".");
   if (parts.length !== 3) return null;
@@ -58,8 +72,7 @@ async function verifyAccessJwt(
   if (header.alg !== "RS256") return null;
   if (typeof payload.exp === "number" && payload.exp * 1000 < Date.now()) return null;
 
-  const audOk = Array.isArray(payload.aud) ? payload.aud.includes(aud) : payload.aud === aud;
-  if (!audOk) return null;
+  if (!audMatches(payload.aud, allowedAuds)) return null;
 
   if (payload.iss && payload.iss.replace(/\/$/, "") !== team) return null;
 
@@ -93,13 +106,13 @@ function bearerToken(req: Request): string | null {
 }
 
 export function predictAuthConfigured(env: PredictAuthEnv): boolean {
-  const accessReady = Boolean(env.CF_ACCESS_TEAM_DOMAIN?.trim() && env.CF_ACCESS_AUD?.trim());
+  const accessReady = Boolean(env.CF_ACCESS_TEAM_DOMAIN?.trim() && configuredAccessAuds(env).length > 0);
   const secretReady = Boolean(env.PREDICT_SECRET?.trim());
   return accessReady || secretReady;
 }
 
 /**
- * `/run` を通してよければ null。拒否なら Response。
+ * `/run`・`/verify`・`/seed` を通してよければ null。拒否なら Response。
  * Access 未設定のまま公開しない。
  */
 export async function authorizePredict(

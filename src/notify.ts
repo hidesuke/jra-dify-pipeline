@@ -45,10 +45,12 @@ export function notifyConfigured(env: NotifyEnv): boolean {
 export function formatRaceUrlFailureEmail(params: {
   date: string;
   failures: RaceUrlCheck[];
+  seedFormUrl?: string;
 }): { subject: string; text: string } {
-  const { date, failures } = params;
+  const { date, failures, seedFormUrl } = params;
   const venues = failures.map((f) => f.venueCode).join(",");
   const subject = `[jra-dify-pipeline] 馬柱URLエラー ${date} 場:${venues}`;
+  const errorPages = failures.filter((f) => f.kind === "error_page");
   const lines = [
     `対象日: ${date}`,
     `各場の 1R URL 検証でエラーを検出しました。`,
@@ -60,9 +62,19 @@ export function formatRaceUrlFailureEmail(params: {
       `理由: ${f.reason ?? "(なし)"}`,
       ``,
     ]),
-    `該当場のレースはキュー投入をスキップしています。`,
-    `開催表（src/schedules）の回次・日次や PREFIX_CODE を確認してください。`,
   ];
+  if (errorPages.length > 0) {
+    lines.push(`パラメータエラーの場はキュー投入をスキップしています。`);
+    if (seedFormUrl) {
+      lines.push(``);
+      lines.push(`チェックサムのシードが変わった可能性がある場合は、次のページで失敗した場の正しい 1R URL を入力してください（Cloudflare Access で保護）。どれか 1 本で全場のシードが更新され、失敗していた場を Queue に再投入します。`);
+      lines.push(seedFormUrl);
+    }
+    lines.push(``);
+    lines.push(`開催表の回次・日次ずれが疑われる場合は src/schedules と PREFIX_CODE を先に確認してください。`);
+  } else {
+    lines.push(`取得失敗のため、該当場は投入を続行しています。`);
+  }
   return { subject, text: lines.join("\n") };
 }
 
@@ -102,10 +114,11 @@ export async function sendNotifyEmail(
 export async function notifyRaceUrlFailures(
   env: NotifyEnv,
   date: string,
-  failures: RaceUrlCheck[]
+  failures: RaceUrlCheck[],
+  options?: { seedFormUrl?: string }
 ): Promise<boolean> {
   if (failures.length === 0) return false;
-  const mail = formatRaceUrlFailureEmail({ date, failures });
+  const mail = formatRaceUrlFailureEmail({ date, failures, seedFormUrl: options?.seedFormUrl });
   console.log(`Notifying race URL failures for ${date}: ${failures.length} venue(s)`);
   return sendNotifyEmail(env, mail);
 }

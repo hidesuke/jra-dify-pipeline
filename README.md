@@ -10,11 +10,12 @@ JRA の開催日ごとに公式レースページ URL を組み立て、Cloudfla
 
 ```
 Cron（金・土 17:30 JST） ─┐
-GET /run（認証必須）      ─┴─→ 年別開催表 → URL 生成 → 各場1R検証 → jra-race-queue → Dify
-                                                      └─ エラーページならメール通知＋その場をスキップ
+GET /run（認証必須）      ─┴─→ KV の seed で URL 生成 → 各場1R検証 → jra-race-queue → Dify
+                                                      └─ エラーページならメール（/seed リンク）＋その場をスキップ
 
 GET /       → 馬柱 URL の一覧のみ（キュー投入も予想もしない）
 GET /verify → 各場 1R の URL 検証のみ（認証必須・投入なし）
+GET /seed   → 失敗した場の正しい 1R URL を入れて seed を更新し、Queue へ再投入（Access 必須）
 ```
 
 | ハンドラ | 役割 |
@@ -23,6 +24,7 @@ GET /verify → 各場 1R の URL 検証のみ（認証必須・投入なし）
 | `GET /` | 馬柱 URL の一覧。Queue にも Dify にも載せない。本文は `text/plain` で URL のみ（1 行 1 URL） |
 | `GET /run` または `POST /run` | 同じ開催を Queue へ投入する。投入前に各場 1R の URL を検証する。ブラウザは Cloudflare Access、CLI は `Authorization: Bearer <PREDICT_SECRET>`。本文は `text/plain` で `Enqueued N races for YYYY-MM-DD` のあと `場コード:レース番号R URL` |
 | `GET /verify` または `POST /verify` | 各場 1R だけを検証する（Queue に載せない）。認証は `/run` と同じ。`?notify=1` で失敗時にメールも送る |
+| `GET /seed` または `POST /seed` | 1R がパラメータエラーだった場の正しい URL を入力する。認証は `/run` と同じ（Cloudflare Access または `PREDICT_SECRET`）。成功すると seed を KV に保存し、失敗していた場を Queue へ再投入する |
 | `queue` | Queue consumer。1 件ずつ Dify へ blocking POST。失敗時は最大 3 回リトライ |
 
 `GET /`・`/run`・`/verify` のクエリは同じです。`date=YYYY-MM-DD`（省略時は JST の今日）、`venue=06`（場コード 2 桁）、`race=1`（1〜12）。
@@ -70,6 +72,7 @@ npm install
 | `npm run dev` | ローカル開発（`wrangler dev`） |
 | `npm run deploy` | Cloudflare へデプロイ |
 | `npm run tail` | 本番ログを購読 |
+| `npm test` | 1R 検証とシード逆算のローカルテスト |
 | `npm run cf-typegen` | Worker の型定義を生成 |
 
 その他の Wrangler サブコマンド（login / queues / secret など）は `npx wrangler` で実行します。
@@ -81,14 +84,21 @@ npm install
 | `DIFY_API_KEY` | はい | Dify API キー（`Authorization: Bearer`） |
 | `DIFY_API_URL` | はい | Workflow 実行エンドポイント。`https://api.dify.ai/v1/workflows/run` |
 | `PREFIX_CODE` | いいえ | JRA CNAME の接頭辞。未設定時は `pw01dde01` |
-| `CF_ACCESS_TEAM_DOMAIN` | `/run` 用 | Zero Trust のチーム URL。例: `https://<team>.cloudflareaccess.com` |
-| `CF_ACCESS_AUD` | `/run` 用 | Access アプリケーションの Audience（AUD）タグ |
+| `PUBLIC_BASE_URL` | いいえ | 失敗メールに載せる Worker の origin。既定は `https://jra-dify-pipeline.hdsk.workers.dev` |
+| `CF_ACCESS_TEAM_DOMAIN` | `/run`・`/seed` 用 | Zero Trust のチーム URL。例: `https://<team>.cloudflareaccess.com` |
+| `CF_ACCESS_AUD` | `/run`・`/seed` 用 | Access アプリケーションの Audience（AUD）タグ。`/run` と `/seed` でアプリが分かれる場合はカンマ区切り |
 | `CF_ACCESS_ALLOWED_EMAIL` | いいえ | 許可するメール。未設定なら Access を通ったユーザーなら可。通知先のフォールバックにも使う |
-| `PREDICT_SECRET` | `/run` 用（代替） | 自分で決めた共有秘密。Cloudflare からは発行されない。CLI では `Authorization: Bearer` に付ける |
+| `PREDICT_SECRET` | `/run`・`/seed` 用（代替） | 自分で決めた共有秘密。Cloudflare からは発行されない。CLI では `Authorization: Bearer` に付ける |
 | `NOTIFY_EMAIL` | 通知用 | 馬柱 URL エラーの通知先。**Email Routing で Verify 済みの Destination address**。`wrangler.jsonc` の `vars` に定義（ダッシュボードと同期） |
 | `NOTIFY_FROM` | いいえ | 送信元。`koumeinowana.info` 上のアドレス。`wrangler.jsonc` の vars 既定は `noreply@koumeinowana.info` |
 
-`/run`・`/verify` は `CF_ACCESS_*` か `PREDICT_SECRET` の少なくとも一方が無いと `503` です。インデックス `/` は認証しません。
+`/run`・`/verify`・`/seed` は `CF_ACCESS_*` か `PREDICT_SECRET` の少なくとも一方が無いと `503` です。インデックス `/` は認証しません。
+
+チェックサムの加算定数（seed）は Workers KV（バインディング `CHECKSUM_SEED`）に保持します。未設定時の初期値は `0x16` です。本番デプロイ前に次で名前空間を作り、`wrangler.jsonc` の `kv_namespaces[0].id` を発行された ID に置き換えてください。
+
+```bash
+npx wrangler kv namespace create checksum-seed
+```
 
 メール送信は Cloudflare Email Service の `send_email` バインディング（`EMAIL`）を使います。Resend 等の外部 API キーは不要です。検証済み Destination 宛てのみ（自分宛通知）なので Workers Free でも利用できます。
 
@@ -127,7 +137,7 @@ Queue consumer が `DIFY_API_URL` へ `POST` する JSON:
 
 1 開催日 × 1 場につき 12 通（1R〜12R）送ります。Worker は Dify の応答本文を保存せず、HTTP ステータスが 2xx なら ack、それ以外はリトライします。
 
-チェックサムは 2026-09-06 / 09-12 / 09-13 の実 URL で検証済みです。月の項は 9 月サンプルのみなので、10 月以降は別途確認してください。
+チェックサムは 2026-09-06 / 09-12 / 09-13 の実 URL で検証済みです。月の項は 9 月サンプルのみなので、不足分は KV の seed に吸収します。1R がパラメータエラーになったら `/seed` で正しい 1R URL を入れ、seed を更新してください。
 
 ## 各場 1R の URL 検証とメール通知
 
@@ -136,8 +146,8 @@ Cron および `/run` はキュー投入の直前に、**各場の 1R だけ** J
 | 結果 | 動作 |
 | --- | --- |
 | 出馬表（OK） | その場の 1〜12R を通常どおり投入 |
-| パラメータエラー等 | その場の全レースを投入スキップし、メール通知（設定時） |
-| 取得失敗（ネットワーク等） | メール通知（設定時）しつつ、その場は投入を続行 |
+| パラメータエラー等 | その場の全レースを投入スキップし、メール通知（設定時）。本文に `/seed` へのリンクを付ける。Access 通過後、失敗した場の正しい 1R URL を 1 本入れると seed を更新し、失敗していた場を Queue へ再投入する |
+| 取得失敗（ネットワーク等） | メール通知（設定時）しつつ、その場は投入を続行。seed は変えない |
 
 通知には [Cloudflare Email Service](https://developers.cloudflare.com/email-service/)（検証済み Destination 宛て）を使います。外部のメール API キーは不要です。
 
@@ -171,7 +181,28 @@ Verified 2 venue 1R URL(s) for 2026-09-12
 09:1R ok 出馬表ページ https://jra.jp/...
 ```
 
-エラー時は HTTP `422` と `error_page` 行が返ります。
+エラー時は HTTP `422` と `error_page` 行が返ります。パラメータエラーの通知メールから `/seed` を開き、正しい 1R URL を入れると seed が KV に保存されます。
+
+### シード補正 `GET|POST /seed`
+
+URL 生成の加算定数（seed）は、正しい 1R URL から逆算できます。JRA 側の定数や未実装の月項が変わると 1R がエラーページになります。そのときだけ人手で更新し、次の失敗まで同じ seed を使います。
+
+1. メールのリンク `https://jra-dify-pipeline.hdsk.workers.dev/seed` を開く（Cloudflare Access）
+2. 失敗した場のうち、どれか 1 場の正しい 1R URL を貼る
+3. Worker が JRA で出馬表か確認し、seed を KV に保存する
+4. 失敗していた日付・場の URL を新しい seed で再生成し、Queue へ投入する
+
+回次・日次が開催表と違う URL は拒否します（seed ではなく開催表の問題）。補正待ちの失敗が無いときは seed を更新できません。
+
+CLI から試す場合:
+
+```bash
+curl -H "Authorization: Bearer $PREDICT_SECRET" \
+  "https://jra-dify-pipeline.hdsk.workers.dev/seed"
+curl -H "Authorization: Bearer $PREDICT_SECRET" \
+  -d "url=https://jra.jp/JRADB/accessD.html?CNAME=..." \
+  "https://jra-dify-pipeline.hdsk.workers.dev/seed"
+```
 
 ## 馬場状態（クッション値・含水率）
 
@@ -301,7 +332,8 @@ npm run deploy
 | Cron で開催なし | `console.log` | `No race scheduled for tomorrow: YYYY-MM-DD` |
 | 1R URL 検証 | `console.log` / `console.error` | `1R verify YYYY-MM-DD 場:06 ok\|error_page\|fetch_failed ...` |
 | メール通知 | `console.log` | `Notifying race URL failures for YYYY-MM-DD: N venue(s)` |
-| キュー投入成功（Cron） | `console.log` | `Successfully enqueued N races for YYYY-MM-DD` |
+| キュー投入成功（Cron） | `console.log` | `Successfully enqueued N races for YYYY-MM-DD (seed=0x16)` |
+| シード更新後の再投入 | `console.log` | `Seed 0x.. re-enqueue YYYY-MM-DD: N races, stillFailed=0` |
 | Dify 呼び出し直前 | `console.log` | `Executing Dify API: YYYY-MM-DD 場:06 1R <url>` |
 | Dify 失敗 | `console.error` | `Failed to process ...` とエラー |
 
@@ -343,13 +375,13 @@ Cron の実行履歴は Worker の **Settings → Triggers** 付近の Cron Even
 
 ### Cloudflare Access（ブラウザ・無料枠）
 
-Worker 全体の Access は付けないでください。`/` までログイン必須になります。
+Zero Trust の **Free**（50 ユーザーまで）で、ホストの **パス `/run` と `/seed`** を保護できます。`workers.dev` も対象にできます。Worker 全体の Access は付けないでください。`/` までログイン必須になります。
 
-Zero Trust の **Free**（50 ユーザーまで）で、ホストの **パス `/run` だけ** を保護できます。`workers.dev` も対象にできます。
+`/run` 用のアプリに加え、同じポリシーでもう 1 つ **パス `seed`** のセルフホストアプリを追加します（AUD が別になるため）。
 
 1. [Zero Trust](https://one.dash.cloudflare.com/) → Access → Applications → アプリケーションを追加
 2. **セルフホストとプライベート** → **パブリックDNS**（プライベート宛先や Workers 全体保護は選ばない）
-3. サブドメイン: `jra-dify-pipeline`、ドメイン: `hdsk.workers.dev`、パス: `run`
+3. サブドメイン: `jra-dify-pipeline`、ドメイン: `hdsk.workers.dev`、パス: `run`（同様にもう 1 つパス `seed`）
 4. ポリシー: Action Allow、Include → **Emails** に自分のメール
 5. App Launcher / Cloudflare One Client 認証 / クライアントレスアクセスはオフ
 6. 発行された **Application Audience (AUD) Tag** と、Settings の **Team domain**（`https://<team>.cloudflareaccess.com`）を控える
@@ -358,6 +390,7 @@ Zero Trust の **Free**（50 ユーザーまで）で、ホストの **パス `/
 ```bash
 npx wrangler secret put CF_ACCESS_TEAM_DOMAIN
 npx wrangler secret put CF_ACCESS_AUD
+# /run と /seed で AUD が違う場合はカンマ区切り: <run-aud>,<seed-aud>
 npx wrangler secret put CF_ACCESS_ALLOWED_EMAIL
 ```
 
@@ -444,6 +477,8 @@ curl -H "Authorization: Bearer local-dev-secret" \
   "http://localhost:8787/verify?date=2026-09-12"
 curl -H "Authorization: Bearer local-dev-secret" \
   "http://localhost:8787/run?date=2026-09-12&venue=06&race=1"
+curl -H "Authorization: Bearer local-dev-secret" \
+  "http://localhost:8787/seed"
 ```
 
 ローカルで Cron 相当（`scheduled`）を試す場合は、公式の [ローカル Cron テスト](https://developers.cloudflare.com/workers/configuration/cron-triggers/#test-cron-triggers-locally) どおり次を叩きます。対象日は JST の翌日です。
