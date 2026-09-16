@@ -9,7 +9,7 @@ JRA の開催日ごとに公式レースページ URL を組み立て、Cloudfla
 ## 仕組み
 
 ```
-Cron（金・土 17:00 JST） ─┐
+Cron（金・土 17:30 JST） ─┐
 GET /run（認証必須）      ─┴─→ 年別開催表 → URL 生成 → jra-race-queue → Dify
 
 GET /  → 馬柱 URL の一覧のみ（キュー投入も予想もしない）
@@ -43,7 +43,7 @@ Enqueued 1 races for 2026-09-12
 
 データの出典は JRA の年度開催日割 PDF（[2026年](https://www.jra.go.jp/keiba/program/2026/pdf/nittei.pdf)、変更版 2026.9.6）です。2026 年は全年 109 開催日（札幌〜小倉）を収録しています。回次・日次が 1 つでもずれるとレース URL のチェックサムが崩れるため、更新時は PDF 巻末の「回 / 日」集計表と件数が一致するか確認してください。
 
-Cron は金・土 17:00 JST（`0 8 * * FRI` / `0 8 * * SAT` UTC）です。Cloudflare の曜日番号は Unix と違い **1=日曜 … 7=土曜** なので、数字の `5`/`6` は木・金になります。曜日は `FRI` / `SAT` で指定してください。月曜開催（例: 2026-09-21 敬老の日、10-12 スポーツの日、11-23 勤労感謝の日、11-30）は自動では流れないので、認証付きの `/run` を使ってください。2026-12-28 は開催なしです。
+Cron は金・土 17:30 JST（`30 8 * * FRI` / `30 8 * * SAT` UTC）です。Cloudflare の曜日番号は Unix と違い **1=日曜 … 7=土曜** なので、数字の `5`/`6` は木・金になります。曜日は `FRI` / `SAT` で指定してください。月曜開催（例: 2026-09-21 敬老の日、10-12 スポーツの日、11-23 勤労感謝の日、11-30）は自動では流れないので、認証付きの `/run` を使ってください。2026-12-28 は開催なしです。
 
 止めるときは `wrangler.jsonc` の `crons` を `[]` にして `npm run deploy` します。`crons` キーを消すだけだと、既存のトリガーが残ります。
 
@@ -164,7 +164,7 @@ Queue consumer が `DIFY_API_URL` へ `POST` する JSON:
 
 ### 対象計測の選び方（タイミング）
 
-Cron は前日 17:00 に翌日分を投入します。クッション値は開催当日の朝に計測・公開されるため、17:00 時点ではその日の実測はまだ存在しません。そこで**対象日と同月日の計測があればそれを、無ければその時点の最新（直近）計測**を付与します。つまり 17:00 投入時は「その時点で公開されている最新の馬場データ」が入ります。
+Cron は前日 17:30 に翌日分を投入します。クッション値は開催当日の朝に計測・公開されるため、17:30 時点ではその日の実測はまだ存在しません。そこで**対象日と同月日の計測があればそれを、無ければその時点の最新（直近）計測**を付与します。つまり 17:30 投入時は「その時点で公開されている最新の馬場データ」が入ります。
 
 ### 確認用エンドポイント `GET /baba`
 
@@ -228,7 +228,7 @@ npx wrangler deploy --secrets-file .env.production
 npm run deploy
 ```
 
-成功すると `*.workers.dev` URL が表示されます。デプロイログに `schedule: 0 8 * * FRI` / `0 8 * * SAT` が出ていれば Cron は有効です。Cron の変更は反映まで数分かかることがあります。
+成功すると `*.workers.dev` URL が表示されます。デプロイログに `schedule: 30 8 * * FRI` / `30 8 * * SAT` が出ていれば Cron は有効です。Cron の変更は反映まで数分かかることがあります。
 
 ### 5. 動作確認
 
@@ -246,7 +246,7 @@ npm run deploy
 
 | タイミング | レベル | 内容 |
 | --- | --- | --- |
-| Cron 発火 | `console.log` | `Cron 0 8 * * FRI target=YYYY-MM-DD`（式と JST 翌日） |
+| Cron 発火 | `console.log` | `Cron 30 8 * * FRI target=YYYY-MM-DD`（式と JST 翌日） |
 | Cron で開催なし | `console.log` | `No race scheduled for tomorrow: YYYY-MM-DD` |
 | キュー投入成功（Cron） | `console.log` | `Successfully enqueued N races for YYYY-MM-DD` |
 | Dify 呼び出し直前 | `console.log` | `Executing Dify API: YYYY-MM-DD 場:06 1R <url>` |
