@@ -3,10 +3,7 @@
  * ローカル検証スクリプト（ネットワーク＋純関数）。
  * Usage: node scripts/test-verify.mjs
  */
-import { readFileSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 
-// --- inline mirrors of classify helpers (keep in sync with src/verifyRaceUrl.ts) ---
 function extractHtmlTitle(html) {
   const m = html.match(/<title>([^<]*)<\/title>/i);
   return m ? m[1].trim() : null;
@@ -118,43 +115,29 @@ assert(
 assert(mail.text.includes(BAD_URL), "email body includes bad URL");
 assert(mail.text.includes("スキップ"), "email body mentions skip");
 
-// mock Resend: ensure payload shape
-const sent = [];
-const mockFetch = async (url, init) => {
-  sent.push({ url, body: JSON.parse(init.body) });
-  return new Response(JSON.stringify({ id: "test" }), { status: 200 });
-};
+// mock Cloudflare EMAIL.send
 {
-  const apiKey = "re_test";
-  const to = "user@example.com";
-  const from = "JRA <alerts@example.com>";
-  const res = await mockFetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
+  const sent = [];
+  const env = {
+    EMAIL: {
+      async send(msg) {
+        sent.push(msg);
+      },
     },
-    body: JSON.stringify({
-      from,
-      to: [to],
-      subject: mail.subject,
-      text: mail.text,
-    }),
+    NOTIFY_EMAIL: "user@example.com",
+    NOTIFY_FROM: "noreply@koumeinowana.info",
+  };
+  await env.EMAIL.send({
+    to: env.NOTIFY_EMAIL,
+    from: env.NOTIFY_FROM,
+    subject: mail.subject,
+    text: mail.text,
   });
-  assert(res.ok, "mock resend ok");
-  assert(sent[0].body.to[0] === to, "resend to");
-  assert(sent[0].body.subject === mail.subject, "resend subject");
+  assert(sent.length === 1, "EMAIL.send called once");
+  assert(sent[0].to === "user@example.com", "to is notify email");
+  assert(sent[0].from === "noreply@koumeinowana.info", "from is domain address");
+  assert(sent[0].subject === mail.subject, "subject matches");
 }
-
-writeFileSync(
-  "/opt/cursor/artifacts/verify_unit_test.log",
-  [
-    `ok: ${JSON.stringify(ok)}`,
-    `bad: ${JSON.stringify(bad)}`,
-    `subject: ${mail.subject}`,
-    `failed=${failed}`,
-  ].join("\n") + "\n"
-);
 
 if (failed) {
   console.error(`\n${failed} assertion(s) failed`);

@@ -85,11 +85,12 @@ npm install
 | `CF_ACCESS_AUD` | `/run` 用 | Access アプリケーションの Audience（AUD）タグ |
 | `CF_ACCESS_ALLOWED_EMAIL` | いいえ | 許可するメール。未設定なら Access を通ったユーザーなら可。通知先のフォールバックにも使う |
 | `PREDICT_SECRET` | `/run` 用（代替） | 自分で決めた共有秘密。Cloudflare からは発行されない。CLI では `Authorization: Bearer` に付ける |
-| `RESEND_API_KEY` | 通知用 | [Resend](https://resend.com/) の API キー。未設定ならメールは送らずログのみ |
-| `NOTIFY_EMAIL` | いいえ | 馬柱 URL エラーの通知先。未設定時は `CF_ACCESS_ALLOWED_EMAIL` |
-| `NOTIFY_FROM` | いいえ | Resend の From。例 `JRA Pipeline <alerts@yourdomain.com>`。未設定時は Resend の onboarding アドレス |
+| `NOTIFY_EMAIL` | 通知用 | 馬柱 URL エラーの通知先。**Email Routing で Verify 済みの Destination address** であること。未設定時は `CF_ACCESS_ALLOWED_EMAIL` |
+| `NOTIFY_FROM` | いいえ | 送信元。`koumeinowana.info` 上のアドレス。`wrangler.jsonc` の vars 既定は `noreply@koumeinowana.info` |
 
 `/run`・`/verify` は `CF_ACCESS_*` か `PREDICT_SECRET` の少なくとも一方が無いと `503` です。インデックス `/` は認証しません。
+
+メール送信は Cloudflare Email Service の `send_email` バインディング（`EMAIL`）を使います。Resend 等の外部 API キーは不要です。検証済み Destination 宛てのみ（自分宛通知）なので Workers Free でも利用できます。
 
 ## Dify に渡すパラメータ
 
@@ -138,13 +139,22 @@ Cron および `/run` はキュー投入の直前に、**各場の 1R だけ** J
 | パラメータエラー等 | その場の全レースを投入スキップし、メール通知（設定時） |
 | 取得失敗（ネットワーク等） | メール通知（設定時）しつつ、その場は投入を続行 |
 
-通知には [Resend](https://resend.com/) を使います。
+通知には [Cloudflare Email Service](https://developers.cloudflare.com/email-service/)（検証済み Destination 宛て）を使います。外部のメール API キーは不要です。
+
+前提（ダッシュボード）:
+
+1. `koumeinowana.info` を Cloudflare に追加し、ネームサーバを向けて **Active**
+2. Email Routing で自分のメールを Destination address に追加し **Verify**
+3. （初回）Email Routing を有効化すると MX 等が自動追加される
+
+Worker 側:
 
 ```bash
-npx wrangler secret put RESEND_API_KEY
+# 通知先（Verify 済みの自分のメール）
 npx wrangler secret put NOTIFY_EMAIL
-# 検証済みドメインの From を使う場合
-npx wrangler secret put NOTIFY_FROM
+# From を変える場合のみ（既定は wrangler.jsonc の noreply@koumeinowana.info）
+# npx wrangler secret put NOTIFY_FROM
+npm run deploy
 ```
 
 検証だけ試す（投入なし）:
@@ -422,10 +432,8 @@ curl -H "Authorization: Bearer $PREDICT_SECRET" \
 DIFY_API_KEY=your-dify-api-key
 DIFY_API_URL=https://api.dify.ai/v1/workflows/run
 PREDICT_SECRET=local-dev-secret
-# 任意: 馬柱 URL エラー通知
-# RESEND_API_KEY=re_xxx
+# 任意: 馬柱 URL エラー通知（本番は Cloudflare Email バインディング。宛先だけローカルでも可）
 # NOTIFY_EMAIL=you@example.com
-# NOTIFY_FROM=JRA Pipeline <alerts@yourdomain.com>
 ```
 
 ```bash

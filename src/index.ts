@@ -15,11 +15,11 @@ export interface Env {
   CF_ACCESS_AUD?: string;
   CF_ACCESS_ALLOWED_EMAIL?: string;
   PREDICT_SECRET?: string;
-  /** Resend API キー（馬柱 URL エラー通知） */
-  RESEND_API_KEY?: string;
-  /** 通知先メール。未設定時は CF_ACCESS_ALLOWED_EMAIL */
+  /** Cloudflare Email Service（send_email バインディング） */
+  EMAIL?: import("./notify").SendEmailBinding;
+  /** 通知先。Email Routing の検証済み Destination。未設定時は CF_ACCESS_ALLOWED_EMAIL */
   NOTIFY_EMAIL?: string;
-  /** Resend の From（例: "JRA Pipeline <alerts@example.com>"） */
+  /** From（koumeinowana.info 上のアドレス） */
   NOTIFY_FROM?: string;
 }
 
