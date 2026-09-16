@@ -82,6 +82,7 @@ npm install
 | `CF_ACCESS_AUD` | `/run` 用 | Access アプリケーションの Audience（AUD）タグ |
 | `CF_ACCESS_ALLOWED_EMAIL` | いいえ | 許可するメール。未設定なら Access を通ったユーザーなら可 |
 | `PREDICT_SECRET` | `/run` 用（代替） | 自分で決めた共有秘密。Cloudflare からは発行されない。CLI では `Authorization: Bearer` に付ける |
+| `INCLUDE_BABA` | いいえ | `1` / `true` / `yes` で、Dify へ馬場状態（クッション値・含水率）を `inputs.track_condition` として付与する。未設定なら従来どおり付与しない。詳細は「馬場状態」参照 |
 
 `/run` は `CF_ACCESS_*` か `PREDICT_SECRET` の少なくとも一方が無いと `503` です。インデックス `/` は認証しません。
 
@@ -93,6 +94,9 @@ npm install
 | --- | --- | --- | --- |
 | `url` | 馬柱URL | はい | JRA 公式のレースページ URL |
 | `remarks` | 備考 | いいえ | `2026-09-12 場:06 1R` 形式（開催日・場コード・レース番号） |
+| `track_condition` | 馬場状態 | いいえ | `INCLUDE_BABA` 有効時のみ付与。クッション値・含水率の 1 行サマリ。詳細は「馬場状態」参照 |
+
+`track_condition` を使う場合は、Dify アプリ側に **同名の text 入力変数 `track_condition`** を追加してください（未定義のまま送るとワークフローによってはエラーになります）。`INCLUDE_BABA` が未設定なら `track_condition` は一切送られないため、既存アプリはそのまま動きます。
 
 Queue consumer が `DIFY_API_URL` へ `POST` する JSON:
 
@@ -119,6 +123,55 @@ Queue consumer が `DIFY_API_URL` へ `POST` する JSON:
 1 開催日 × 1 場につき 12 通（1R〜12R）送ります。Worker は Dify の応答本文を保存せず、HTTP ステータスが 2xx なら ack、それ以外はリトライします。
 
 チェックサムは 2026-09-06 / 09-12 / 09-13 の実 URL で検証済みです。月の項は 9 月サンプルのみなので、10 月以降は別途確認してください。
+
+## 馬場状態（クッション値・含水率）
+
+`INCLUDE_BABA` を有効にすると、JRA 公式の馬場情報（クッション値・含水率）を取得し、Dify へ `inputs.track_condition` として渡します。予測ロジック自体は Dify 側なので、Dify ワークフローでこの変数を読んで予想に反映してください。
+
+### クッション値が「取れない」問題について
+
+馬場ページ（[index](https://www.jra.go.jp/keiba/baba/index.html) / [index2](https://www.jra.go.jp/keiba/baba/index2.html) / [index3](https://www.jra.go.jp/keiba/baba/index3.html)）は、クッション値が JS 描画のため単純な HTML 取得では見えません。ただし調査の結果、`baba2025.js` が相対パスの**静的 HTML フラグメントを ajax 読み込み**しているだけと判明しました。したがってヘッドレスブラウザは不要で、Worker から次を直接 GET すれば取得できます。
+
+| URL | 内容 |
+| --- | --- |
+| `https://www.jra.go.jp/keiba/baba/_data_cushion.html` | クッション値（開催全場） |
+| `https://www.jra.go.jp/keiba/baba/_data_moist.html` | 含水率（芝・ダート × ゴール前 / 4 コーナー、馬場状態区分） |
+
+これらは **Shift_JIS** なので `TextDecoder("shift_jis")` で復号します（Cloudflare Workers ランタイムでサポートを確認済み）。1 ファイルに開催中の全場が入り、会場は `title`（会場名）で識別されるため、場コードへマッピングしています。パースは `src/baba.ts`。
+
+### 対象日の選び方（重要なタイミングの注意）
+
+クッション値は**開催当日の朝**（7:00 頃）に計測・公開されます。一方 Cron は前日 17:00 に翌日分を投入するため、その時点では**当日のクッション値はまだ存在しません**。そこで:
+
+- 対象日と同じ月日の計測があればそれ（`計測:` 表記）を、
+- 無ければ**直近の計測を参考値**（`直近参考:` 表記）として付与します。
+
+当日の実測値で予想したい場合は、開催当日の朝（値が出てから）に認証付き `/run` を叩くか、当日朝の Cron を別途追加してください。
+
+### 確認用エンドポイント `GET /baba`
+
+取得・パースした馬場データを JSON で返します（認証なし・キュー投入なし・読み取り専用）。
+
+```bash
+# 全場の生データ
+curl "https://jra-dify-pipeline.hdsk.workers.dev/baba"
+# 対象日について各場で選ばれる計測（対象日 or 直近参考値）も含める
+curl "https://jra-dify-pipeline.hdsk.workers.dev/baba?date=2026-09-13"
+```
+
+`track_condition` の中身の例:
+
+```
+クッション値:8.2 / 芝含水率(ゴール前/4角):13.5/14.8 soft / ダート含水率(ゴール前/4角):14.1/15.4 soft (計測:9月13日（日曜）7時00分)
+```
+
+### 有効化
+
+```bash
+npx wrangler secret put INCLUDE_BABA   # 値は 1
+```
+
+ローカルは `.dev.vars` に `INCLUDE_BABA=1`。取得に失敗しても投入は止めず、その回は馬場情報なしで送ります。
 
 ## Cloudflare へのデプロイ
 
