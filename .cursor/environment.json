@@ -1,0 +1,17 @@
+{
+  "name": "jra-dify-pipeline",
+  "install": "npm ci",
+  "terminals": [
+    {
+      "name": "wrangler dev",
+      "command": "npm run dev",
+      "description": "Local Cloudflare Worker dev server (Miniflare) on http://127.0.0.1:8787. Cloudflare Queues are simulated locally. Reads local secrets from .dev.vars when present (DIFY_API_KEY, DIFY_API_URL, PREDICT_SECRET)."
+    }
+  ],
+  "ports": [
+    {
+      "name": "wrangler dev",
+      "port": 8787
+    }
+  ]
+}
