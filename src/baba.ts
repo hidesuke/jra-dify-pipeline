@@ -63,6 +63,23 @@ export interface VenueBaba {
   measurements: BabaMeasurement[];
 }
 
+/** 芝丈（cm）。芝コース・障害コース × 野芝・洋芝 */
+export interface TurfLength {
+  shibaNoshiba: string | null; // 芝コースの野芝
+  shibaYoshiba: string | null; // 芝コースの洋芝
+  shogaiNoshiba: string | null; // 障害コースの野芝
+  shogaiYoshiba: string | null; // 障害コースの洋芝
+}
+
+/** 会場ごとのコース情報（芝丈・使用コース・芝の状態） */
+export interface CourseInfo {
+  venueName: string;
+  venueCode: string | null;
+  turfLength: TurfLength | null; // 芝丈
+  usedCourse: string | null; // 使用コース（例: Bコース…）
+  turfCondition: string | null; // 芝の状態（傷み等のコメント）
+}
+
 function toNumberOrNull(raw: string | undefined): number | null {
   if (raw == null) return null;
   const v = raw.trim();
@@ -200,14 +217,101 @@ export function mergeBaba(
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
+const decodeShiftJis = async (res: Response) =>
+  new TextDecoder("shift_jis").decode(await res.arrayBuffer());
+
 /** JRA から馬場データを取得・パースする。取得失敗時は例外を投げる */
 export async function fetchBaba(fetchImpl: FetchLike = fetch): Promise<VenueBaba[]> {
-  const decode = async (res: Response) => new TextDecoder("shift_jis").decode(await res.arrayBuffer());
   const [cushionRes, moistRes] = await Promise.all([fetchImpl(CUSHION_URL), fetchImpl(MOIST_URL)]);
   if (!cushionRes.ok) throw new Error(`cushion fetch failed: ${cushionRes.status}`);
   if (!moistRes.ok) throw new Error(`moist fetch failed: ${moistRes.status}`);
-  const [cushionHtml, moistHtml] = await Promise.all([decode(cushionRes), decode(moistRes)]);
+  const [cushionHtml, moistHtml] = await Promise.all([decodeShiftJis(cushionRes), decodeShiftJis(moistRes)]);
   return mergeBaba(parseCushionHtml(cushionHtml), parseMoistHtml(moistHtml));
+}
+
+// 芝丈・使用コース・芝の状態は各会場のインデックスページに静的掲載されている。
+// index.html / index2.html / index3.html が同時開催の各場（会場は <title> で判別）。
+export const INDEX_URLS = [
+  "https://www.jra.go.jp/keiba/baba/index.html",
+  "https://www.jra.go.jp/keiba/baba/index2.html",
+  "https://www.jra.go.jp/keiba/baba/index3.html",
+];
+
+function stripTags(html: string): string {
+  return html
+    .replace(/<[^>]+>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function cleanTextOrNull(html: string | undefined): string | null {
+  if (html == null) return null;
+  const t = stripTags(html);
+  return t ? t : null;
+}
+
+function parseVenueNameFromTitle(html: string): string | null {
+  const m = html.match(/<title>[^<]*（(.+?)競馬場）/);
+  return m ? m[1].trim() : null;
+}
+
+/** 芝丈テーブル（`<div class="turf_length">`）をパースする */
+function parseTurfLength(html: string): TurfLength | null {
+  const block = html.match(/<div class="turf_length">([\s\S]*?)<\/table>/);
+  if (!block) return null;
+  const tbody = block[1];
+  const row = (label: string): [string | null, string | null] => {
+    const re = new RegExp(
+      `<th[^>]*scope="row"[^>]*>\\s*${label}\\s*<\\/th>\\s*<td>([\\s\\S]*?)<\\/td>\\s*<td>([\\s\\S]*?)<\\/td>`
+    );
+    const m = tbody.match(re);
+    if (!m) return [null, null];
+    return [cleanTextOrNull(m[1]), cleanTextOrNull(m[2])];
+  };
+  const [shibaNoshiba, shibaYoshiba] = row("芝");
+  const [shogaiNoshiba, shogaiYoshiba] = row("障害");
+  if (!shibaNoshiba && !shibaYoshiba && !shogaiNoshiba && !shogaiYoshiba) return null;
+  return { shibaNoshiba, shibaYoshiba, shogaiNoshiba, shogaiYoshiba };
+}
+
+/** `<h3>{見出し}</h3>` 直後の `.content` テキストを取り出す */
+function contentAfterHeading(html: string, heading: string): string | null {
+  const re = new RegExp(`<h3>\\s*${heading}\\s*<\\/h3>[\\s\\S]*?<div class="content">([\\s\\S]*?)<\\/div>`);
+  const m = html.match(re);
+  return m ? cleanTextOrNull(m[1]) : null;
+}
+
+/** インデックスページ 1 枚から会場のコース情報をパースする */
+export function parseCourseInfo(html: string): CourseInfo | null {
+  const venueName = parseVenueNameFromTitle(html);
+  if (!venueName) return null;
+  return {
+    venueName,
+    venueCode: VENUE_NAME_TO_CODE[venueName] ?? null,
+    turfLength: parseTurfLength(html),
+    usedCourse: contentAfterHeading(html, "使用コース"),
+    turfCondition: contentAfterHeading(html, "芝の状態"),
+  };
+}
+
+/** 各会場のコース情報を場コード -> CourseInfo で返す（best-effort、失敗ページはスキップ） */
+export async function fetchCourseInfoByVenue(
+  fetchImpl: FetchLike = fetch
+): Promise<Map<string, CourseInfo>> {
+  const map = new Map<string, CourseInfo>();
+  await Promise.all(
+    INDEX_URLS.map(async (url) => {
+      try {
+        const res = await fetchImpl(url);
+        if (!res.ok) return;
+        const info = parseCourseInfo(await decodeShiftJis(res));
+        if (info?.venueCode) map.set(info.venueCode, info);
+      } catch {
+        // ページが無い場合（開催数が少ない等）はスキップ
+      }
+    })
+  );
+  return map;
 }
 
 /**
@@ -235,8 +339,22 @@ export function selectMeasurement(
   return { measurement: venue.measurements[0], exact: false };
 }
 
+/** 芝丈を読みやすい文字列にする（値の無い項目・「なし」は省く） */
+function formatTurfLength(tl: TurfLength): string | null {
+  const seg = (label: string, noshiba: string | null, yoshiba: string | null): string | null => {
+    const xs: string[] = [];
+    if (noshiba && noshiba !== "なし") xs.push(`野芝${noshiba}`);
+    if (yoshiba && yoshiba !== "なし") xs.push(`洋芝${yoshiba}`);
+    return xs.length ? `${label}${xs.join("・")}` : null;
+  };
+  const parts = [seg("芝", tl.shibaNoshiba, tl.shibaYoshiba), seg("障害", tl.shogaiNoshiba, tl.shogaiYoshiba)].filter(
+    (x): x is string => Boolean(x)
+  );
+  return parts.length ? `芝丈(cm) ${parts.join(" ")}` : null;
+}
+
 /** remarks へ入れる 1 行サマリ文字列を作る */
-export function formatBabaSummary(m: BabaMeasurement): string {
+export function formatBabaSummary(m: BabaMeasurement, course?: CourseInfo | null): string {
   const surface = (label: string, p: MoisturePair | null): string => {
     if (!p) return `${label}:不明`;
     const gj = conditionToJp(p.goalCondition);
@@ -255,5 +373,14 @@ export function formatBabaSummary(m: BabaMeasurement): string {
     surface("ダート", m.dirt),
   ];
   if (m.rainfallMm != null) parts.push(`当日雨量${m.rainfallMm}mm`);
+
+  if (course) {
+    if (course.usedCourse) parts.push(`使用コース:${course.usedCourse}`);
+    if (course.turfLength) {
+      const tl = formatTurfLength(course.turfLength);
+      if (tl) parts.push(tl);
+    }
+    if (course.turfCondition) parts.push(`芝の状態:${course.turfCondition}`);
+  }
   return `馬場[${m.time}] ${parts.join(" / ")}`;
 }

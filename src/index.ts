@@ -1,6 +1,6 @@
 import { authorizePredict } from "./access";
 import { getSchedulesForDate, type ScheduleItem } from "./schedules";
-import { fetchBaba, selectMeasurement, formatBabaSummary } from "./baba";
+import { fetchBaba, fetchCourseInfoByVenue, selectMeasurement, formatBabaSummary } from "./baba";
 
 export type { ScheduleItem };
 
@@ -49,12 +49,12 @@ async function loadBabaByVenue(
 ): Promise<Map<string, BabaAttachment>> {
   const map = new Map<string, BabaAttachment>();
   try {
-    const venues = await fetchBaba();
+    const [venues, courseByVenue] = await Promise.all([fetchBaba(), fetchCourseInfoByVenue()]);
     for (const code of new Set(venueCodes)) {
       const sel = selectMeasurement(venues, code, targetDate);
       if (!sel) continue;
       map.set(code, {
-        summary: formatBabaSummary(sel.measurement),
+        summary: formatBabaSummary(sel.measurement, courseByVenue.get(code)),
         measuredAt: sel.measurement.time,
       });
     }
@@ -209,15 +209,17 @@ async function babaDebug(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const date = url.searchParams.get("date") || undefined;
   try {
-    const venues = await fetchBaba();
+    const [venues, courseByVenue] = await Promise.all([fetchBaba(), fetchCourseInfoByVenue()]);
+    const course = Object.fromEntries(courseByVenue);
     const selected = date
       ? venues.map((v) => ({
           venueCode: v.venueCode,
           venueName: v.venueName,
+          course: v.venueCode ? courseByVenue.get(v.venueCode) ?? null : null,
           ...(selectMeasurement(venues, v.venueCode ?? "", date) ?? { measurement: null, exact: false })
         }))
       : undefined;
-    return Response.json({ fetchedAt: new Date().toISOString(), date: date ?? null, venues, selected });
+    return Response.json({ fetchedAt: new Date().toISOString(), date: date ?? null, venues, course, selected });
   } catch (error) {
     return new Response(`baba fetch error: ${error}\n`, { status: 502 });
   }
