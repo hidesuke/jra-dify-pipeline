@@ -85,7 +85,7 @@ npm install
 | `CF_ACCESS_AUD` | `/run` 用 | Access アプリケーションの Audience（AUD）タグ |
 | `CF_ACCESS_ALLOWED_EMAIL` | いいえ | 許可するメール。未設定なら Access を通ったユーザーなら可。通知先のフォールバックにも使う |
 | `PREDICT_SECRET` | `/run` 用（代替） | 自分で決めた共有秘密。Cloudflare からは発行されない。CLI では `Authorization: Bearer` に付ける |
-| `NOTIFY_EMAIL` | 通知用 | 馬柱 URL エラーの通知先。**Email Routing で Verify 済みの Destination address** であること。未設定時は `CF_ACCESS_ALLOWED_EMAIL` |
+| `NOTIFY_EMAIL` | 通知用 | 馬柱 URL エラーの通知先。**Email Routing で Verify 済みの Destination address**。`wrangler.jsonc` の `vars` に定義（ダッシュボードと同期） |
 | `NOTIFY_FROM` | いいえ | 送信元。`koumeinowana.info` 上のアドレス。`wrangler.jsonc` の vars 既定は `noreply@koumeinowana.info` |
 
 `/run`・`/verify` は `CF_ACCESS_*` か `PREDICT_SECRET` の少なくとも一方が無いと `503` です。インデックス `/` は認証しません。
@@ -147,13 +147,9 @@ Cron および `/run` はキュー投入の直前に、**各場の 1R だけ** J
 2. Email Routing で自分のメールを Destination address に追加し **Verify**
 3. （初回）Email Routing を有効化すると MX 等が自動追加される
 
-Worker 側:
+Worker 側（`wrangler.jsonc` の `vars` に `NOTIFY_EMAIL` / `NOTIFY_FROM` を書いてデプロイ。ダッシュボードで変えたら config も合わせておく）:
 
 ```bash
-# 通知先（Verify 済みの自分のメール）
-npx wrangler secret put NOTIFY_EMAIL
-# From を変える場合のみ（既定は wrangler.jsonc の noreply@koumeinowana.info）
-# npx wrangler secret put NOTIFY_FROM
 npm run deploy
 ```
 

@@ -3,7 +3,9 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-09-01",
   "vars": {
-    // Email Routing ドメイン上の From（検証済み Destination 宛て通知用）
+    // 検証済み Destination（ダッシュボードと同期。再デプロイで消えないように wrangler にも書く）
+    "NOTIFY_EMAIL": "hidesuke@gmail.com",
+    // Email Routing ドメイン上の From
     "NOTIFY_FROM": "noreply@koumeinowana.info"
   },
   "send_email": [
