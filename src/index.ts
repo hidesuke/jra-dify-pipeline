@@ -1,5 +1,6 @@
 import { authorizePredict } from "./access";
 import { getSchedulesForDate, type ScheduleItem } from "./schedules";
+import { fetchBaba, fetchCourseInfoByVenue, selectMeasurement, formatBabaSummary } from "./baba";
 
 export type { ScheduleItem };
 
@@ -12,6 +13,12 @@ export interface Env {
   CF_ACCESS_AUD?: string;
   CF_ACCESS_ALLOWED_EMAIL?: string;
   PREDICT_SECRET?: string;
+}
+
+/** RaceMessage に載せる馬場サマリ（remarks へ差し込む） */
+export interface BabaAttachment {
+  summary: string; // remarks に入れる 1 行テキスト
+  measuredAt: string; // 計測時刻（生文字列）
 }
 
 /** JST の暦日。extraDays=1 なら JST の翌日 */
@@ -29,6 +36,32 @@ export interface RaceMessage {
   venueCode: string;
   raceNo: number;
   raceUrl: string;
+  baba?: BabaAttachment;
+}
+
+/**
+ * 対象日の各場について馬場データを 1 件ずつ引く（best-effort）。
+ * 取得に失敗しても投入は止めない（空 Map を返す）。
+ */
+async function loadBabaByVenue(
+  targetDate: string,
+  venueCodes: string[]
+): Promise<Map<string, BabaAttachment>> {
+  const map = new Map<string, BabaAttachment>();
+  try {
+    const [venues, courseByVenue] = await Promise.all([fetchBaba(), fetchCourseInfoByVenue()]);
+    for (const code of new Set(venueCodes)) {
+      const sel = selectMeasurement(venues, code, targetDate);
+      if (!sel) continue;
+      map.set(code, {
+        summary: formatBabaSummary(sel.measurement, courseByVenue.get(code)),
+        measuredAt: sel.measurement.time,
+      });
+    }
+  } catch (error) {
+    console.error("Failed to fetch baba data (continuing without it):", error);
+  }
+  return map;
 }
 
 // ---------------------------------------------------------
@@ -87,6 +120,8 @@ export default {
     const prefix = env.PREFIX_CODE || "pw01dde01";
     const messages: MessageSendRequest<RaceMessage>[] = [];
 
+    const babaByVenue = await loadBabaByVenue(targetDateKey, schedules.map((s) => s.venueCode));
+
     for (const schedule of schedules) {
       const raceList = generateRaceUrls(schedule, dateCompact, prefix);
       for (const item of raceList) {
@@ -95,7 +130,8 @@ export default {
             targetDate: targetDateKey,
             venueCode: schedule.venueCode,
             raceNo: item.raceNo,
-            raceUrl: item.url
+            raceUrl: item.url,
+            baba: babaByVenue.get(schedule.venueCode)
           }
         });
       }
@@ -108,8 +144,10 @@ export default {
   // 2. Queue Consumer: Dify API を順次キック
   async queue(batch: MessageBatch<RaceMessage>, env: Env): Promise<void> {
     for (const msg of batch.messages) {
-      const { targetDate, venueCode, raceNo, raceUrl } = msg.body;
-      console.log(`Executing Dify API: ${targetDate} 場:${venueCode} ${raceNo}R ${raceUrl}`);
+      const { targetDate, venueCode, raceNo, raceUrl, baba } = msg.body;
+      // 馬場情報がある場合は remarks（備考欄）に追記する。
+      const remarks = `${targetDate} 場:${venueCode} ${raceNo}R${baba ? ` ｜ ${baba.summary}` : ""}`;
+      console.log(`Executing Dify API: ${remarks} ${raceUrl}`);
 
       try {
         const res = await fetch(env.DIFY_API_URL, {
@@ -121,7 +159,7 @@ export default {
           body: JSON.stringify({
             inputs: {
               url: raceUrl,
-              remarks: `${targetDate} 場:${venueCode} ${raceNo}R`
+              remarks
             },
             query: `${targetDate} 場:${venueCode} ${raceNo}R`,
             response_mode: "blocking",
@@ -153,6 +191,10 @@ export default {
       return enqueueRaces(req, env);
     }
 
+    if (path === "/baba") {
+      return babaDebug(req);
+    }
+
     if (path !== "/") {
       return new Response("Not found\n", { status: 404 });
     }
@@ -160,6 +202,28 @@ export default {
     return listRaceUrls(req, env);
   }
 };
+
+// GET /baba : 取得・パースした馬場データを JSON で返す（読み取り専用・認証なし）。
+// ?date=YYYY-MM-DD を付けると、各場について選ばれる計測（対象日 or 直近参考値）も返す。
+async function babaDebug(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+  const date = url.searchParams.get("date") || undefined;
+  try {
+    const [venues, courseByVenue] = await Promise.all([fetchBaba(), fetchCourseInfoByVenue()]);
+    const course = Object.fromEntries(courseByVenue);
+    const selected = date
+      ? venues.map((v) => ({
+          venueCode: v.venueCode,
+          venueName: v.venueName,
+          course: v.venueCode ? courseByVenue.get(v.venueCode) ?? null : null,
+          ...(selectMeasurement(venues, v.venueCode ?? "", date) ?? { measurement: null, exact: false })
+        }))
+      : undefined;
+    return Response.json({ fetchedAt: new Date().toISOString(), date: date ?? null, venues, course, selected });
+  } catch (error) {
+    return new Response(`baba fetch error: ${error}\n`, { status: 502 });
+  }
+}
 
 type RaceRow = { venueCode: string; raceNo: number; url: string };
 
@@ -220,16 +284,24 @@ async function enqueueRaces(req: Request, env: Env): Promise<Response> {
   const resolved = resolveRaces(req, env);
   if ("error" in resolved) return resolved.error;
 
+  const babaByVenue = await loadBabaByVenue(resolved.date, resolved.rows.map((r) => r.venueCode));
+
   const messages = resolved.rows.map(r => ({
     body: {
       targetDate: resolved.date,
       venueCode: r.venueCode,
       raceNo: r.raceNo,
-      raceUrl: r.url
+      raceUrl: r.url,
+      baba: babaByVenue.get(r.venueCode)
     }
   }));
 
   await env.RACE_QUEUE.sendBatch(messages);
-  const preview = resolved.rows.map(r => `${r.venueCode}:${r.raceNo}R ${r.url}`).join("\n");
+  const preview = resolved.rows
+    .map(r => {
+      const baba = babaByVenue.get(r.venueCode);
+      return `${r.venueCode}:${r.raceNo}R ${r.url}${baba ? ` | ${baba.summary}` : ""}`;
+    })
+    .join("\n");
   return new Response(`Enqueued ${messages.length} races for ${resolved.date}\n${preview}\n`, { status: 200 });
 }
