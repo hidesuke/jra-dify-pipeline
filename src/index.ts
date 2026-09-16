@@ -1,5 +1,11 @@
 import { authorizePredict } from "./access";
 import { getSchedulesForDate, type ScheduleItem } from "./schedules";
+import {
+  fetchBaba,
+  selectMeasurement,
+  formatBabaSummary,
+  type MoisturePair,
+} from "./baba";
 
 export type { ScheduleItem };
 
@@ -12,6 +18,24 @@ export interface Env {
   CF_ACCESS_AUD?: string;
   CF_ACCESS_ALLOWED_EMAIL?: string;
   PREDICT_SECRET?: string;
+  // "1" / "true" のとき、Dify へ馬場状態（クッション値・含水率）を付与する。
+  // 有効化する前に、Dify ワークフロー側に text 入力変数 `track_condition` を追加すること。
+  INCLUDE_BABA?: string;
+}
+
+export function babaEnabled(env: Env): boolean {
+  const v = env.INCLUDE_BABA?.trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
+}
+
+/** RaceMessage に載せる馬場サマリ */
+export interface BabaAttachment {
+  summary: string; // Dify へ渡す 1 行テキスト
+  measuredAt: string; // 計測時刻（生文字列）
+  exact: boolean; // true=対象日の実測値, false=直近の参考値
+  cushion: number | null;
+  turf: MoisturePair | null;
+  dirt: MoisturePair | null;
 }
 
 /** JST の暦日。extraDays=1 なら JST の翌日 */
@@ -29,6 +53,36 @@ export interface RaceMessage {
   venueCode: string;
   raceNo: number;
   raceUrl: string;
+  baba?: BabaAttachment;
+}
+
+/**
+ * 対象日の各場について馬場データを 1 件ずつ引く（best-effort）。
+ * 取得に失敗しても投入は止めない（空 Map を返す）。
+ */
+async function loadBabaByVenue(
+  targetDate: string,
+  venueCodes: string[]
+): Promise<Map<string, BabaAttachment>> {
+  const map = new Map<string, BabaAttachment>();
+  try {
+    const venues = await fetchBaba();
+    for (const code of new Set(venueCodes)) {
+      const sel = selectMeasurement(venues, code, targetDate);
+      if (!sel) continue;
+      map.set(code, {
+        summary: formatBabaSummary(sel.measurement, sel.exact),
+        measuredAt: sel.measurement.time,
+        exact: sel.exact,
+        cushion: sel.measurement.cushion,
+        turf: sel.measurement.turf,
+        dirt: sel.measurement.dirt,
+      });
+    }
+  } catch (error) {
+    console.error("Failed to fetch baba data (continuing without it):", error);
+  }
+  return map;
 }
 
 // ---------------------------------------------------------
@@ -87,6 +141,10 @@ export default {
     const prefix = env.PREFIX_CODE || "pw01dde01";
     const messages: MessageSendRequest<RaceMessage>[] = [];
 
+    const babaByVenue = babaEnabled(env)
+      ? await loadBabaByVenue(targetDateKey, schedules.map((s) => s.venueCode))
+      : new Map<string, BabaAttachment>();
+
     for (const schedule of schedules) {
       const raceList = generateRaceUrls(schedule, dateCompact, prefix);
       for (const item of raceList) {
@@ -95,7 +153,8 @@ export default {
             targetDate: targetDateKey,
             venueCode: schedule.venueCode,
             raceNo: item.raceNo,
-            raceUrl: item.url
+            raceUrl: item.url,
+            baba: babaByVenue.get(schedule.venueCode)
           }
         });
       }
@@ -108,8 +167,18 @@ export default {
   // 2. Queue Consumer: Dify API を順次キック
   async queue(batch: MessageBatch<RaceMessage>, env: Env): Promise<void> {
     for (const msg of batch.messages) {
-      const { targetDate, venueCode, raceNo, raceUrl } = msg.body;
-      console.log(`Executing Dify API: ${targetDate} 場:${venueCode} ${raceNo}R ${raceUrl}`);
+      const { targetDate, venueCode, raceNo, raceUrl, baba } = msg.body;
+      const babaLog = baba ? ` 馬場[${baba.summary}]` : "";
+      console.log(`Executing Dify API: ${targetDate} 場:${venueCode} ${raceNo}R ${raceUrl}${babaLog}`);
+
+      // baba がある場合のみ track_condition を追加する（既存の入力は不変）。
+      const inputs: Record<string, string> = {
+        url: raceUrl,
+        remarks: `${targetDate} 場:${venueCode} ${raceNo}R`
+      };
+      if (baba) {
+        inputs.track_condition = baba.summary;
+      }
 
       try {
         const res = await fetch(env.DIFY_API_URL, {
@@ -119,10 +188,7 @@ export default {
             "Content-Type": "application/json"
           },
           body: JSON.stringify({
-            inputs: {
-              url: raceUrl,
-              remarks: `${targetDate} 場:${venueCode} ${raceNo}R`
-            },
+            inputs,
             query: `${targetDate} 場:${venueCode} ${raceNo}R`,
             response_mode: "blocking",
             user: "cloudflare-queue-worker"
@@ -153,6 +219,10 @@ export default {
       return enqueueRaces(req, env);
     }
 
+    if (path === "/baba") {
+      return babaDebug(req);
+    }
+
     if (path !== "/") {
       return new Response("Not found\n", { status: 404 });
     }
@@ -160,6 +230,26 @@ export default {
     return listRaceUrls(req, env);
   }
 };
+
+// GET /baba : 取得・パースした馬場データを JSON で返す（読み取り専用・認証なし）。
+// ?date=YYYY-MM-DD を付けると、各場について選ばれる計測（対象日 or 直近参考値）も返す。
+async function babaDebug(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+  const date = url.searchParams.get("date") || undefined;
+  try {
+    const venues = await fetchBaba();
+    const selected = date
+      ? venues.map((v) => ({
+          venueCode: v.venueCode,
+          venueName: v.venueName,
+          ...(selectMeasurement(venues, v.venueCode ?? "", date) ?? { measurement: null, exact: false })
+        }))
+      : undefined;
+    return Response.json({ fetchedAt: new Date().toISOString(), date: date ?? null, venues, selected });
+  } catch (error) {
+    return new Response(`baba fetch error: ${error}\n`, { status: 502 });
+  }
+}
 
 type RaceRow = { venueCode: string; raceNo: number; url: string };
 
@@ -220,16 +310,26 @@ async function enqueueRaces(req: Request, env: Env): Promise<Response> {
   const resolved = resolveRaces(req, env);
   if ("error" in resolved) return resolved.error;
 
+  const babaByVenue = babaEnabled(env)
+    ? await loadBabaByVenue(resolved.date, resolved.rows.map((r) => r.venueCode))
+    : new Map<string, BabaAttachment>();
+
   const messages = resolved.rows.map(r => ({
     body: {
       targetDate: resolved.date,
       venueCode: r.venueCode,
       raceNo: r.raceNo,
-      raceUrl: r.url
+      raceUrl: r.url,
+      baba: babaByVenue.get(r.venueCode)
     }
   }));
 
   await env.RACE_QUEUE.sendBatch(messages);
-  const preview = resolved.rows.map(r => `${r.venueCode}:${r.raceNo}R ${r.url}`).join("\n");
+  const preview = resolved.rows
+    .map(r => {
+      const baba = babaByVenue.get(r.venueCode);
+      return `${r.venueCode}:${r.raceNo}R ${r.url}${baba ? ` | ${baba.summary}` : ""}`;
+    })
+    .join("\n");
   return new Response(`Enqueued ${messages.length} races for ${resolved.date}\n${preview}\n`, { status: 200 });
 }

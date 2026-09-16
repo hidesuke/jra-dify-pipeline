@@ -1,0 +1,223 @@
+// JRA 馬場状態（クッション値・含水率）の取得とパース。
+//
+// クッション値は「JS 描画で取れない」と言われがちだが、実体は baba2025.js が
+// 相対パスの静的 HTML フラグメント（_data_cushion.html / _data_moist.html）を
+// ajax 読み込みしているだけ。よってヘッドレスブラウザは不要で、Worker から
+// 直接 GET できる。ファイルは Shift_JIS なので TextDecoder("shift_jis") で復号する
+// （workerd でサポートされていることを確認済み）。1 ファイルに開催中の全場
+// （rcA/rcB/rcC…）が入り、会場は title 属性（会場名）で識別されるため、
+// 場コードへマッピングする。
+
+export const CUSHION_URL = "https://www.jra.go.jp/keiba/baba/_data_cushion.html";
+export const MOIST_URL = "https://www.jra.go.jp/keiba/baba/_data_moist.html";
+
+const VENUE_NAME_TO_CODE: Record<string, string> = {
+  "札幌": "01",
+  "函館": "02",
+  "福島": "03",
+  "新潟": "04",
+  "東京": "05",
+  "中山": "06",
+  "中京": "07",
+  "京都": "08",
+  "阪神": "09",
+  "小倉": "10",
+};
+
+/** 芝またはダートの含水率（ゴール前 mg / 4 コーナー m4c）と馬場状態 */
+export interface MoisturePair {
+  goal: number | null; // ゴール前（mg）
+  corner4: number | null; // 4 コーナー（m4c）
+  condition: string | null; // data-condition: hard/soft/heavy/wet など
+}
+
+/** 1 回の計測（クッション値・含水率） */
+export interface BabaMeasurement {
+  time: string; // 生の計測時刻文字列 例 "9月13日（日曜）7時00分"
+  month: number | null;
+  day: number | null;
+  cushion: number | null;
+  turf: MoisturePair | null;
+  dirt: MoisturePair | null;
+}
+
+/** 会場ごとの馬場データ（計測は新しい順） */
+export interface VenueBaba {
+  venueName: string;
+  venueCode: string | null;
+  measurements: BabaMeasurement[];
+}
+
+function toNumberOrNull(raw: string | undefined): number | null {
+  if (raw == null) return null;
+  const v = raw.trim();
+  if (!v || v === "-" || v === "－") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseMonthDay(time: string): { month: number | null; day: number | null } {
+  const m = time.match(/(\d{1,2})月(\d{1,2})日/);
+  if (!m) return { month: null, day: null };
+  return { month: Number(m[1]), day: Number(m[2]) };
+}
+
+/** `<div id="rcX" title="会場名">…</div>` の会場ブロックに分割する */
+function splitVenueBlocks(html: string): { venueName: string; body: string }[] {
+  const re = /<div\s+id="rc[A-Z]"\s+title="([^"]*)"\s*>/g;
+  const starts: { name: string; index: number }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    starts.push({ name: m[1], index: m.index });
+  }
+  return starts.map((s, i) => ({
+    venueName: s.name,
+    body: html.slice(s.index, i + 1 < starts.length ? starts[i + 1].index : undefined),
+  }));
+}
+
+/** turf / dirt の含水率ブロックをパースする */
+function parseMoisturePair(chunk: string, kind: "turf" | "dirt"): MoisturePair | null {
+  const block = chunk.match(new RegExp(`<div class="${kind}">([\\s\\S]*?)<\\/div>`));
+  if (!block) return null;
+  const inner = block[1];
+  const mg = inner.match(/<span[^>]*class="mg"[^>]*data-condition="([^"]*)"[^>]*>([^<]*)<\/span>/);
+  const m4c = inner.match(/<span[^>]*class="m4c"[^>]*data-condition="([^"]*)"[^>]*>([^<]*)<\/span>/);
+  const condition = mg?.[1] ?? m4c?.[1] ?? null;
+  return {
+    goal: toNumberOrNull(mg?.[2]),
+    corner4: toNumberOrNull(m4c?.[2]),
+    condition: condition && condition.trim() ? condition.trim() : null,
+  };
+}
+
+/** _data_cushion.html をパースして 会場名 -> {time -> cushion} を返す */
+export function parseCushionHtml(html: string): Map<string, { time: string; cushion: number | null }[]> {
+  const result = new Map<string, { time: string; cushion: number | null }[]>();
+  for (const { venueName, body } of splitVenueBlocks(html)) {
+    const units: { time: string; cushion: number | null }[] = [];
+    const unitRe = /<div class="time">([\s\S]*?)<\/div>\s*<div class="cushion">([\s\S]*?)<\/div>/g;
+    let u: RegExpExecArray | null;
+    while ((u = unitRe.exec(body)) !== null) {
+      units.push({ time: u[1].trim(), cushion: toNumberOrNull(u[2]) });
+    }
+    result.set(venueName, units);
+  }
+  return result;
+}
+
+/** _data_moist.html をパースして 会場名 -> [{time, turf, dirt}] を返す */
+export function parseMoistHtml(
+  html: string
+): Map<string, { time: string; turf: MoisturePair | null; dirt: MoisturePair | null }[]> {
+  const result = new Map<string, { time: string; turf: MoisturePair | null; dirt: MoisturePair | null }[]>();
+  for (const { venueName, body } of splitVenueBlocks(html)) {
+    const units: { time: string; turf: MoisturePair | null; dirt: MoisturePair | null }[] = [];
+    const timeRe = /<div class="time">([\s\S]*?)<\/div>/g;
+    const times: { time: string; index: number }[] = [];
+    let t: RegExpExecArray | null;
+    while ((t = timeRe.exec(body)) !== null) {
+      times.push({ time: t[1].trim(), index: t.index });
+    }
+    for (let i = 0; i < times.length; i++) {
+      const chunk = body.slice(times[i].index, i + 1 < times.length ? times[i + 1].index : undefined);
+      units.push({
+        time: times[i].time,
+        turf: parseMoisturePair(chunk, "turf"),
+        dirt: parseMoisturePair(chunk, "dirt"),
+      });
+    }
+    result.set(venueName, units);
+  }
+  return result;
+}
+
+/** クッションと含水率をマージして会場ごとの構造化データにする */
+export function mergeBaba(
+  cushion: Map<string, { time: string; cushion: number | null }[]>,
+  moist: Map<string, { time: string; turf: MoisturePair | null; dirt: MoisturePair | null }[]>
+): VenueBaba[] {
+  const venueNames = new Set<string>([...cushion.keys(), ...moist.keys()]);
+  const out: VenueBaba[] = [];
+  for (const venueName of venueNames) {
+    // クッションと含水率は計測時刻が数十分ずれるため、時刻文字列ではなく
+    // 「月日」でまとめる。パースできない場合のみ時刻文字列をキーにする。
+    const byDay = new Map<string, BabaMeasurement>();
+    const keyFor = (time: string, month: number | null, day: number | null) =>
+      month != null && day != null ? `${month}-${day}` : time;
+    const ensure = (time: string): BabaMeasurement => {
+      const { month, day } = parseMonthDay(time);
+      const key = keyFor(time, month, day);
+      let e = byDay.get(key);
+      if (!e) {
+        e = { time, month, day, cushion: null, turf: null, dirt: null };
+        byDay.set(key, e);
+      }
+      return e;
+    };
+    for (const c of cushion.get(venueName) ?? []) ensure(c.time).cushion = c.cushion;
+    for (const m of moist.get(venueName) ?? []) {
+      const e = ensure(m.time);
+      e.turf = m.turf;
+      e.dirt = m.dirt;
+    }
+    out.push({
+      venueName,
+      venueCode: VENUE_NAME_TO_CODE[venueName] ?? null,
+      measurements: [...byDay.values()],
+    });
+  }
+  return out;
+}
+
+export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
+
+/** JRA から馬場データを取得・パースする。取得失敗時は例外を投げる */
+export async function fetchBaba(fetchImpl: FetchLike = fetch): Promise<VenueBaba[]> {
+  const decode = async (res: Response) => new TextDecoder("shift_jis").decode(await res.arrayBuffer());
+  const [cushionRes, moistRes] = await Promise.all([fetchImpl(CUSHION_URL), fetchImpl(MOIST_URL)]);
+  if (!cushionRes.ok) throw new Error(`cushion fetch failed: ${cushionRes.status}`);
+  if (!moistRes.ok) throw new Error(`moist fetch failed: ${moistRes.status}`);
+  const [cushionHtml, moistHtml] = await Promise.all([decode(cushionRes), decode(moistRes)]);
+  return mergeBaba(parseCushionHtml(cushionHtml), parseMoistHtml(moistHtml));
+}
+
+/**
+ * 指定した場コードの馬場計測を 1 件選ぶ。
+ * targetDate（YYYY-MM-DD）と同じ月日の計測があればそれを、無ければ最新（先頭）を返す。
+ * exact=false の場合は「対象日の値ではなく直近参考値」であることを示す。
+ */
+export function selectMeasurement(
+  venues: VenueBaba[],
+  venueCode: string,
+  targetDate?: string
+): { measurement: BabaMeasurement; exact: boolean } | null {
+  const venue = venues.find((v) => v.venueCode === venueCode);
+  if (!venue || venue.measurements.length === 0) return null;
+
+  if (targetDate) {
+    const tm = targetDate.match(/^\d{4}-(\d{2})-(\d{2})$/);
+    if (tm) {
+      const month = Number(tm[1]);
+      const day = Number(tm[2]);
+      const exact = venue.measurements.find((m) => m.month === month && m.day === day);
+      if (exact) return { measurement: exact, exact: true };
+    }
+  }
+  return { measurement: venue.measurements[0], exact: false };
+}
+
+/** Dify へ渡す 1 行サマリ文字列を作る */
+export function formatBabaSummary(m: BabaMeasurement, exact: boolean): string {
+  const parts: string[] = [];
+  parts.push(`クッション値:${m.cushion ?? "不明"}`);
+  const fmtPair = (label: string, p: MoisturePair | null) => {
+    if (!p) return `${label}:不明`;
+    const cond = p.condition ? ` ${p.condition}` : "";
+    return `${label}(ゴール前/4角):${p.goal ?? "-"}/${p.corner4 ?? "-"}${cond}`;
+  };
+  parts.push(fmtPair("芝含水率", m.turf));
+  parts.push(fmtPair("ダート含水率", m.dirt));
+  const tag = exact ? "計測" : "直近参考";
+  return `${parts.join(" / ")} (${tag}:${m.time})`;
+}
