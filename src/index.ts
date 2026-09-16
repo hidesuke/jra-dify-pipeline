@@ -1,6 +1,8 @@
 import { authorizePredict } from "./access";
 import { getSchedulesForDate, type ScheduleItem } from "./schedules";
 import { fetchBaba, fetchCourseInfoByVenue, selectMeasurement, formatBabaSummary } from "./baba";
+import { notifyRaceUrlFailures } from "./notify";
+import { verifyVenue1RUrls, type RaceUrlCheck } from "./verifyRaceUrl";
 
 export type { ScheduleItem };
 
@@ -13,6 +15,12 @@ export interface Env {
   CF_ACCESS_AUD?: string;
   CF_ACCESS_ALLOWED_EMAIL?: string;
   PREDICT_SECRET?: string;
+  /** Resend API キー（馬柱 URL エラー通知） */
+  RESEND_API_KEY?: string;
+  /** 通知先メール。未設定時は CF_ACCESS_ALLOWED_EMAIL */
+  NOTIFY_EMAIL?: string;
+  /** Resend の From（例: "JRA Pipeline <alerts@example.com>"） */
+  NOTIFY_FROM?: string;
 }
 
 /** RaceMessage に載せる馬場サマリ（remarks へ差し込む） */
@@ -118,24 +126,33 @@ export default {
 
     const dateCompact = targetDateKey.replace(/-/g, "");
     const prefix = env.PREFIX_CODE || "pw01dde01";
-    const messages: MessageSendRequest<RaceMessage>[] = [];
-
-    const babaByVenue = await loadBabaByVenue(targetDateKey, schedules.map((s) => s.venueCode));
+    const allRows: RaceRow[] = [];
 
     for (const schedule of schedules) {
       const raceList = generateRaceUrls(schedule, dateCompact, prefix);
       for (const item of raceList) {
-        messages.push({
-          body: {
-            targetDate: targetDateKey,
-            venueCode: schedule.venueCode,
-            raceNo: item.raceNo,
-            raceUrl: item.url,
-            baba: babaByVenue.get(schedule.venueCode)
-          }
-        });
+        allRows.push({ venueCode: schedule.venueCode, raceNo: item.raceNo, url: item.url });
       }
     }
+
+    const { rows, checks } = await filterRowsBy1RVerification(env, targetDateKey, allRows);
+    logVerification(targetDateKey, checks);
+
+    if (rows.length === 0) {
+      console.log(`No races enqueued for ${targetDateKey} after 1R URL verification`);
+      return;
+    }
+
+    const babaByVenue = await loadBabaByVenue(targetDateKey, rows.map((r) => r.venueCode));
+    const messages: MessageSendRequest<RaceMessage>[] = rows.map((r) => ({
+      body: {
+        targetDate: targetDateKey,
+        venueCode: r.venueCode,
+        raceNo: r.raceNo,
+        raceUrl: r.url,
+        baba: babaByVenue.get(r.venueCode),
+      },
+    }));
 
     await env.RACE_QUEUE.sendBatch(messages);
     console.log(`Successfully enqueued ${messages.length} races for ${targetDateKey}`);
@@ -191,6 +208,12 @@ export default {
       return enqueueRaces(req, env);
     }
 
+    if (path === "/verify") {
+      const denied = await authorizePredict(req, env, ctx);
+      if (denied) return denied;
+      return verifyRaces(req, env);
+    }
+
     if (path === "/baba") {
       return babaDebug(req);
     }
@@ -202,6 +225,42 @@ export default {
     return listRaceUrls(req, env);
   }
 };
+
+/**
+ * 各場 1R を検証し、エラーページの場を除外する。
+ * エラー／取得失敗はメール通知（設定時）。取得失敗の場は除外せず投入を続行する。
+ */
+async function filterRowsBy1RVerification(
+  env: Env,
+  date: string,
+  rows: RaceRow[]
+): Promise<{ rows: RaceRow[]; checks: RaceUrlCheck[] }> {
+  const checks = await verifyVenue1RUrls(rows);
+  const badVenues = new Set(
+    checks.filter((c) => c.kind === "error_page").map((c) => c.venueCode)
+  );
+  const notifyTargets = checks.filter((c) => c.kind === "error_page" || c.kind === "fetch_failed");
+  if (notifyTargets.length > 0) {
+    await notifyRaceUrlFailures(env, date, notifyTargets);
+  }
+  if (badVenues.size === 0) return { rows, checks };
+  return {
+    rows: rows.filter((r) => !badVenues.has(r.venueCode)),
+    checks,
+  };
+}
+
+function logVerification(date: string, checks: RaceUrlCheck[]): void {
+  if (checks.length === 0) {
+    console.log(`1R URL verification skipped for ${date} (no 1R in selection)`);
+    return;
+  }
+  for (const c of checks) {
+    const line = `1R verify ${date} 場:${c.venueCode} ${c.kind} ${c.reason ?? ""} ${c.url}`;
+    if (c.ok) console.log(line);
+    else console.error(line);
+  }
+}
 
 // GET /baba : 取得・パースした馬場データを JSON で返す（読み取り専用・認証なし）。
 // ?date=YYYY-MM-DD を付けると、各場について選ばれる計測（対象日 or 直近参考値）も返す。
@@ -284,24 +343,75 @@ async function enqueueRaces(req: Request, env: Env): Promise<Response> {
   const resolved = resolveRaces(req, env);
   if ("error" in resolved) return resolved.error;
 
-  const babaByVenue = await loadBabaByVenue(resolved.date, resolved.rows.map((r) => r.venueCode));
+  const { rows, checks } = await filterRowsBy1RVerification(env, resolved.date, resolved.rows);
+  logVerification(resolved.date, checks);
 
-  const messages = resolved.rows.map(r => ({
+  if (rows.length === 0) {
+    const detail = formatVerifyLines(checks);
+    return new Response(
+      `No races enqueued for ${resolved.date} (1R URL verification failed)\n${detail}\n`,
+      { status: 422 }
+    );
+  }
+
+  const babaByVenue = await loadBabaByVenue(resolved.date, rows.map((r) => r.venueCode));
+
+  const messages = rows.map((r) => ({
     body: {
       targetDate: resolved.date,
       venueCode: r.venueCode,
       raceNo: r.raceNo,
       raceUrl: r.url,
-      baba: babaByVenue.get(r.venueCode)
-    }
+      baba: babaByVenue.get(r.venueCode),
+    },
   }));
 
   await env.RACE_QUEUE.sendBatch(messages);
-  const preview = resolved.rows
-    .map(r => {
+  const skipped = checks.filter((c) => c.kind === "error_page");
+  const verifyBlock = checks.length
+    ? `\n1R verification:\n${formatVerifyLines(checks)}\n`
+    : "\n";
+  const skipNote =
+    skipped.length > 0
+      ? `Skipped venues (error page): ${skipped.map((c) => c.venueCode).join(",")}\n`
+      : "";
+  const preview = rows
+    .map((r) => {
       const baba = babaByVenue.get(r.venueCode);
       return `${r.venueCode}:${r.raceNo}R ${r.url}${baba ? ` | ${baba.summary}` : ""}`;
     })
     .join("\n");
-  return new Response(`Enqueued ${messages.length} races for ${resolved.date}\n${preview}\n`, { status: 200 });
+  return new Response(
+    `Enqueued ${messages.length} races for ${resolved.date}\n${skipNote}${verifyBlock}${preview}\n`,
+    { status: 200 }
+  );
+}
+
+/** GET|POST /verify : 各場 1R の URL 検証のみ（キュー投入なし・認証必須） */
+async function verifyRaces(req: Request, env: Env): Promise<Response> {
+  const resolved = resolveRaces(req, env);
+  if ("error" in resolved) return resolved.error;
+
+  const checks = await verifyVenue1RUrls(resolved.rows);
+  logVerification(resolved.date, checks);
+
+  const notify = new URL(req.url).searchParams.get("notify") === "1";
+  if (notify) {
+    const failures = checks.filter((c) => !c.ok);
+    if (failures.length > 0) await notifyRaceUrlFailures(env, resolved.date, failures);
+  }
+
+  const failed = checks.some((c) => !c.ok);
+  const body = `Verified ${checks.length} venue 1R URL(s) for ${resolved.date}\n${formatVerifyLines(checks)}\n`;
+  return new Response(body, {
+    status: failed ? 422 : 200,
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
+  });
+}
+
+function formatVerifyLines(checks: RaceUrlCheck[]): string {
+  if (checks.length === 0) return "(no 1R in selection)";
+  return checks
+    .map((c) => `${c.venueCode}:1R ${c.kind} ${c.reason ?? ""} ${c.url}`)
+    .join("\n");
 }

@@ -10,19 +10,22 @@ JRA の開催日ごとに公式レースページ URL を組み立て、Cloudfla
 
 ```
 Cron（金・土 17:30 JST） ─┐
-GET /run（認証必須）      ─┴─→ 年別開催表 → URL 生成 → jra-race-queue → Dify
+GET /run（認証必須）      ─┴─→ 年別開催表 → URL 生成 → 各場1R検証 → jra-race-queue → Dify
+                                                      └─ エラーページならメール通知＋その場をスキップ
 
-GET /  → 馬柱 URL の一覧のみ（キュー投入も予想もしない）
+GET /       → 馬柱 URL の一覧のみ（キュー投入も予想もしない）
+GET /verify → 各場 1R の URL 検証のみ（認証必須・投入なし）
 ```
 
 | ハンドラ | 役割 |
 | --- | --- |
 | `scheduled` | Cloudflare Cron が呼ぶ。HTTP ではない。JST 翌日の開催を Queue へ投入する |
 | `GET /` | 馬柱 URL の一覧。Queue にも Dify にも載せない。本文は `text/plain` で URL のみ（1 行 1 URL） |
-| `GET /run` または `POST /run` | 同じ開催を Queue へ投入する。ブラウザは Cloudflare Access、CLI は `Authorization: Bearer <PREDICT_SECRET>`。本文は `text/plain` で `Enqueued N races for YYYY-MM-DD` のあと `場コード:レース番号R URL` |
+| `GET /run` または `POST /run` | 同じ開催を Queue へ投入する。投入前に各場 1R の URL を検証する。ブラウザは Cloudflare Access、CLI は `Authorization: Bearer <PREDICT_SECRET>`。本文は `text/plain` で `Enqueued N races for YYYY-MM-DD` のあと `場コード:レース番号R URL` |
+| `GET /verify` または `POST /verify` | 各場 1R だけを検証する（Queue に載せない）。認証は `/run` と同じ。`?notify=1` で失敗時にメールも送る |
 | `queue` | Queue consumer。1 件ずつ Dify へ blocking POST。失敗時は最大 3 回リトライ |
 
-`GET /` と `/run` のクエリは同じです。`date=YYYY-MM-DD`（省略時は JST の今日）、`venue=06`（場コード 2 桁）、`race=1`（1〜12）。
+`GET /`・`/run`・`/verify` のクエリは同じです。`date=YYYY-MM-DD`（省略時は JST の今日）、`venue=06`（場コード 2 桁）、`race=1`（1〜12）。
 
 成功時の本文例:
 
@@ -80,10 +83,13 @@ npm install
 | `PREFIX_CODE` | いいえ | JRA CNAME の接頭辞。未設定時は `pw01dde01` |
 | `CF_ACCESS_TEAM_DOMAIN` | `/run` 用 | Zero Trust のチーム URL。例: `https://<team>.cloudflareaccess.com` |
 | `CF_ACCESS_AUD` | `/run` 用 | Access アプリケーションの Audience（AUD）タグ |
-| `CF_ACCESS_ALLOWED_EMAIL` | いいえ | 許可するメール。未設定なら Access を通ったユーザーなら可 |
+| `CF_ACCESS_ALLOWED_EMAIL` | いいえ | 許可するメール。未設定なら Access を通ったユーザーなら可。通知先のフォールバックにも使う |
 | `PREDICT_SECRET` | `/run` 用（代替） | 自分で決めた共有秘密。Cloudflare からは発行されない。CLI では `Authorization: Bearer` に付ける |
+| `RESEND_API_KEY` | 通知用 | [Resend](https://resend.com/) の API キー。未設定ならメールは送らずログのみ |
+| `NOTIFY_EMAIL` | いいえ | 馬柱 URL エラーの通知先。未設定時は `CF_ACCESS_ALLOWED_EMAIL` |
+| `NOTIFY_FROM` | いいえ | Resend の From。例 `JRA Pipeline <alerts@yourdomain.com>`。未設定時は Resend の onboarding アドレス |
 
-`/run` は `CF_ACCESS_*` か `PREDICT_SECRET` の少なくとも一方が無いと `503` です。インデックス `/` は認証しません。
+`/run`・`/verify` は `CF_ACCESS_*` か `PREDICT_SECRET` の少なくとも一方が無いと `503` です。インデックス `/` は認証しません。
 
 ## Dify に渡すパラメータ
 
@@ -121,6 +127,45 @@ Queue consumer が `DIFY_API_URL` へ `POST` する JSON:
 1 開催日 × 1 場につき 12 通（1R〜12R）送ります。Worker は Dify の応答本文を保存せず、HTTP ステータスが 2xx なら ack、それ以外はリトライします。
 
 チェックサムは 2026-09-06 / 09-12 / 09-13 の実 URL で検証済みです。月の項は 9 月サンプルのみなので、10 月以降は別途確認してください。
+
+## 各場 1R の URL 検証とメール通知
+
+Cron および `/run` はキュー投入の直前に、**各場の 1R だけ** JRA 公式ページを GET し、エラーページでないかを確認します。不正な CNAME でも HTTP は 200 のまま「パラメータエラー」ページになるため、ステータスではなく本文（`パラメータエラー` / `error.css` / `.error_code`、出馬表マーカー欠落）で判定します。
+
+| 結果 | 動作 |
+| --- | --- |
+| 出馬表（OK） | その場の 1〜12R を通常どおり投入 |
+| パラメータエラー等 | その場の全レースを投入スキップし、メール通知（設定時） |
+| 取得失敗（ネットワーク等） | メール通知（設定時）しつつ、その場は投入を続行 |
+
+通知には [Resend](https://resend.com/) を使います。
+
+```bash
+npx wrangler secret put RESEND_API_KEY
+npx wrangler secret put NOTIFY_EMAIL
+# 検証済みドメインの From を使う場合
+npx wrangler secret put NOTIFY_FROM
+```
+
+検証だけ試す（投入なし）:
+
+```bash
+curl -H "Authorization: Bearer $PREDICT_SECRET" \
+  "https://jra-dify-pipeline.hdsk.workers.dev/verify?date=2026-09-12"
+# 失敗時にメールも送る
+curl -H "Authorization: Bearer $PREDICT_SECRET" \
+  "https://jra-dify-pipeline.hdsk.workers.dev/verify?date=2026-09-12&notify=1"
+```
+
+成功時の例:
+
+```
+Verified 2 venue 1R URL(s) for 2026-09-12
+06:1R ok 出馬表ページ https://jra.jp/...
+09:1R ok 出馬表ページ https://jra.jp/...
+```
+
+エラー時は HTTP `422` と `error_page` 行が返ります。
 
 ## 馬場状態（クッション値・含水率）
 
@@ -248,6 +293,8 @@ npm run deploy
 | --- | --- | --- |
 | Cron 発火 | `console.log` | `Cron 30 8 * * FRI target=YYYY-MM-DD`（式と JST 翌日） |
 | Cron で開催なし | `console.log` | `No race scheduled for tomorrow: YYYY-MM-DD` |
+| 1R URL 検証 | `console.log` / `console.error` | `1R verify YYYY-MM-DD 場:06 ok\|error_page\|fetch_failed ...` |
+| メール通知 | `console.log` | `Notifying race URL failures for YYYY-MM-DD: N venue(s)` |
 | キュー投入成功（Cron） | `console.log` | `Successfully enqueued N races for YYYY-MM-DD` |
 | Dify 呼び出し直前 | `console.log` | `Executing Dify API: YYYY-MM-DD 場:06 1R <url>` |
 | Dify 失敗 | `console.error` | `Failed to process ...` とエラー |
@@ -375,6 +422,10 @@ curl -H "Authorization: Bearer $PREDICT_SECRET" \
 DIFY_API_KEY=your-dify-api-key
 DIFY_API_URL=https://api.dify.ai/v1/workflows/run
 PREDICT_SECRET=local-dev-secret
+# 任意: 馬柱 URL エラー通知
+# RESEND_API_KEY=re_xxx
+# NOTIFY_EMAIL=you@example.com
+# NOTIFY_FROM=JRA Pipeline <alerts@yourdomain.com>
 ```
 
 ```bash
@@ -385,6 +436,8 @@ npm run dev
 
 ```bash
 curl "http://localhost:8787/?date=2026-09-12&venue=06&race=1"
+curl -H "Authorization: Bearer local-dev-secret" \
+  "http://localhost:8787/verify?date=2026-09-12"
 curl -H "Authorization: Bearer local-dev-secret" \
   "http://localhost:8787/run?date=2026-09-12&venue=06&race=1"
 ```
