@@ -1,31 +1,45 @@
-// 馬柱 URL 検証失敗時のメール通知（Resend HTTP API）。
+// 馬柱 URL 検証失敗時のメール通知（Cloudflare Email Service）。
 //
-// 必須シークレットが無い場合は送信せず console.warn のみ（投入フローは止めない）。
+// 自分の検証済み Destination address 宛てに送る想定。
+// EMAIL バインディング未設定、または宛先／From が無い場合はログのみ（投入は止めない）。
 // 宛先は NOTIFY_EMAIL、未設定なら CF_ACCESS_ALLOWED_EMAIL を使う。
 
 import type { RaceUrlCheck } from "./verifyRaceUrl";
 
+/** Workers の send_email バインディング（Email Service） */
+export interface SendEmailBinding {
+  send(message: {
+    to: string | string[];
+    from: string;
+    subject: string;
+    text?: string;
+    html?: string;
+  }): Promise<{ messageId?: string } | void>;
+}
+
 export interface NotifyEnv {
-  RESEND_API_KEY?: string;
-  /** 通知先。未設定時は CF_ACCESS_ALLOWED_EMAIL */
+  /** wrangler.jsonc の send_email バインディング */
+  EMAIL?: SendEmailBinding;
+  /** 通知先。未設定時は CF_ACCESS_ALLOWED_EMAIL（いずれも Email Routing で Verify 済みであること） */
   NOTIFY_EMAIL?: string;
   CF_ACCESS_ALLOWED_EMAIL?: string;
-  /** Resend の From。例: "JRA Pipeline <alerts@example.com>" */
+  /** From。koumeinowana.info 上のアドレス。例: noreply@koumeinowana.info */
   NOTIFY_FROM?: string;
 }
 
-export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
-
-const RESEND_ENDPOINT = "https://api.resend.com/emails";
-const DEFAULT_FROM = "jra-dify-pipeline <onboarding@resend.dev>";
+const DEFAULT_FROM = "noreply@koumeinowana.info";
 
 export function resolveNotifyTo(env: NotifyEnv): string | null {
   const to = (env.NOTIFY_EMAIL ?? env.CF_ACCESS_ALLOWED_EMAIL)?.trim();
   return to || null;
 }
 
+export function resolveNotifyFrom(env: NotifyEnv): string {
+  return env.NOTIFY_FROM?.trim() || DEFAULT_FROM;
+}
+
 export function notifyConfigured(env: NotifyEnv): boolean {
-  return Boolean(env.RESEND_API_KEY?.trim() && resolveNotifyTo(env));
+  return Boolean(env.EMAIL && resolveNotifyTo(env));
 }
 
 export function formatRaceUrlFailureEmail(params: {
@@ -53,43 +67,30 @@ export function formatRaceUrlFailureEmail(params: {
 }
 
 /**
- * Resend でメール送信。未設定時は no-op（false）。
- * 送信失敗時は例外を投げず false を返す（呼び出し側でログ）。
+ * Cloudflare Email で送信。未設定時は no-op（false）。
+ * 送信失敗時は例外を投げず false を返す。
  */
 export async function sendNotifyEmail(
   env: NotifyEnv,
-  mail: { subject: string; text: string },
-  fetchImpl: FetchLike = fetch
+  mail: { subject: string; text: string }
 ): Promise<boolean> {
-  const apiKey = env.RESEND_API_KEY?.trim();
   const to = resolveNotifyTo(env);
-  if (!apiKey || !to) {
+  const from = resolveNotifyFrom(env);
+  if (!env.EMAIL || !to) {
     console.warn(
-      "Email notify skipped: set RESEND_API_KEY and NOTIFY_EMAIL (or CF_ACCESS_ALLOWED_EMAIL)"
+      "Email notify skipped: bind send_email as EMAIL and set NOTIFY_EMAIL (or CF_ACCESS_ALLOWED_EMAIL)"
     );
     return false;
   }
 
-  const from = env.NOTIFY_FROM?.trim() || DEFAULT_FROM;
   try {
-    const res = await fetchImpl(RESEND_ENDPOINT, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        from,
-        to: [to],
-        subject: mail.subject,
-        text: mail.text,
-      }),
+    await env.EMAIL.send({
+      to,
+      from,
+      subject: mail.subject,
+      text: mail.text,
     });
-    if (!res.ok) {
-      const body = await res.text();
-      console.error(`Resend API error (${res.status}): ${body}`);
-      return false;
-    }
+    console.log(`Email notify sent to ${to} from ${from}`);
     return true;
   } catch (error) {
     console.error("Failed to send notify email:", error);
@@ -101,11 +102,10 @@ export async function sendNotifyEmail(
 export async function notifyRaceUrlFailures(
   env: NotifyEnv,
   date: string,
-  failures: RaceUrlCheck[],
-  fetchImpl: FetchLike = fetch
+  failures: RaceUrlCheck[]
 ): Promise<boolean> {
   if (failures.length === 0) return false;
   const mail = formatRaceUrlFailureEmail({ date, failures });
   console.log(`Notifying race URL failures for ${date}: ${failures.length} venue(s)`);
-  return sendNotifyEmail(env, mail, fetchImpl);
+  return sendNotifyEmail(env, mail);
 }
