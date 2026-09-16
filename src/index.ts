@@ -17,7 +17,6 @@ import {
 import { handleSeedRequest, type SeedEnqueueResult } from "./seedForm";
 
 export type { ScheduleItem };
-export { calculateInitialChecksum, generateRaceUrls, DEFAULT_SEED } from "./checksum";
 
 export interface Env {
   DIFY_API_KEY: string;
