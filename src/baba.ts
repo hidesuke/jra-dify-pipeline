@@ -24,21 +24,36 @@ const VENUE_NAME_TO_CODE: Record<string, string> = {
   "小倉": "10",
 };
 
-/** 芝またはダートの含水率（ゴール前 mg / 4 コーナー m4c）と馬場状態 */
-export interface MoisturePair {
-  goal: number | null; // ゴール前（mg）
-  corner4: number | null; // 4 コーナー（m4c）
-  condition: string | null; // data-condition: hard/soft/heavy/wet など
+// 含水率の色分け（data-condition）→ 馬場状態区分。baba2025.js の定義に準拠。
+const CONDITION_JP: Record<string, string> = {
+  hard: "良",
+  wet: "稍重",
+  soft: "重",
+  heavy: "不良",
+};
+
+export function conditionToJp(condition: string | null): string | null {
+  if (!condition) return null;
+  return CONDITION_JP[condition] ?? condition;
 }
 
-/** 1 回の計測（クッション値・含水率） */
+/** 芝またはダートの含水率（ゴール前 mg / 4 コーナー m4c）と馬場状態区分 */
+export interface MoisturePair {
+  goal: number | null; // ゴール前（mg）の含水率(%)
+  corner4: number | null; // 4 コーナー（m4c）の含水率(%)
+  goalCondition: string | null; // ゴール前の区分 hard/soft/heavy/wet
+  corner4Condition: string | null; // 4 コーナーの区分
+}
+
+/** 1 回の計測（クッション値・含水率・当日雨量） */
 export interface BabaMeasurement {
   time: string; // 生の計測時刻文字列 例 "9月13日（日曜）7時00分"
   month: number | null;
   day: number | null;
-  cushion: number | null;
-  turf: MoisturePair | null;
-  dirt: MoisturePair | null;
+  cushion: number | null; // クッション値
+  turf: MoisturePair | null; // 芝の含水率
+  dirt: MoisturePair | null; // ダートの含水率
+  rainfallMm: number | null; // 測定時刻までの当日雨量(mm)
 }
 
 /** 会場ごとの馬場データ（計測は新しい順） */
@@ -83,12 +98,18 @@ function parseMoisturePair(chunk: string, kind: "turf" | "dirt"): MoisturePair |
   const inner = block[1];
   const mg = inner.match(/<span[^>]*class="mg"[^>]*data-condition="([^"]*)"[^>]*>([^<]*)<\/span>/);
   const m4c = inner.match(/<span[^>]*class="m4c"[^>]*data-condition="([^"]*)"[^>]*>([^<]*)<\/span>/);
-  const condition = mg?.[1] ?? m4c?.[1] ?? null;
   return {
     goal: toNumberOrNull(mg?.[2]),
     corner4: toNumberOrNull(m4c?.[2]),
-    condition: condition && condition.trim() ? condition.trim() : null,
+    goalCondition: mg?.[1]?.trim() || null,
+    corner4Condition: m4c?.[1]?.trim() || null,
   };
+}
+
+/** 当日雨量(mm)を moist_caution の注記からパースする */
+function parseRainfall(chunk: string): number | null {
+  const m = chunk.match(/当日雨量は([\d.]+)ミリメートル/);
+  return m ? toNumberOrNull(m[1]) : null;
 }
 
 /** _data_cushion.html をパースして 会場名 -> {time -> cushion} を返す */
@@ -106,13 +127,18 @@ export function parseCushionHtml(html: string): Map<string, { time: string; cush
   return result;
 }
 
-/** _data_moist.html をパースして 会場名 -> [{time, turf, dirt}] を返す */
-export function parseMoistHtml(
-  html: string
-): Map<string, { time: string; turf: MoisturePair | null; dirt: MoisturePair | null }[]> {
-  const result = new Map<string, { time: string; turf: MoisturePair | null; dirt: MoisturePair | null }[]>();
+interface MoistUnit {
+  time: string;
+  turf: MoisturePair | null;
+  dirt: MoisturePair | null;
+  rainfallMm: number | null;
+}
+
+/** _data_moist.html をパースして 会場名 -> [{time, turf, dirt, rainfallMm}] を返す */
+export function parseMoistHtml(html: string): Map<string, MoistUnit[]> {
+  const result = new Map<string, MoistUnit[]>();
   for (const { venueName, body } of splitVenueBlocks(html)) {
-    const units: { time: string; turf: MoisturePair | null; dirt: MoisturePair | null }[] = [];
+    const units: MoistUnit[] = [];
     const timeRe = /<div class="time">([\s\S]*?)<\/div>/g;
     const times: { time: string; index: number }[] = [];
     let t: RegExpExecArray | null;
@@ -125,6 +151,7 @@ export function parseMoistHtml(
         time: times[i].time,
         turf: parseMoisturePair(chunk, "turf"),
         dirt: parseMoisturePair(chunk, "dirt"),
+        rainfallMm: parseRainfall(chunk),
       });
     }
     result.set(venueName, units);
@@ -135,7 +162,7 @@ export function parseMoistHtml(
 /** クッションと含水率をマージして会場ごとの構造化データにする */
 export function mergeBaba(
   cushion: Map<string, { time: string; cushion: number | null }[]>,
-  moist: Map<string, { time: string; turf: MoisturePair | null; dirt: MoisturePair | null }[]>
+  moist: Map<string, MoistUnit[]>
 ): VenueBaba[] {
   const venueNames = new Set<string>([...cushion.keys(), ...moist.keys()]);
   const out: VenueBaba[] = [];
@@ -150,7 +177,7 @@ export function mergeBaba(
       const key = keyFor(time, month, day);
       let e = byDay.get(key);
       if (!e) {
-        e = { time, month, day, cushion: null, turf: null, dirt: null };
+        e = { time, month, day, cushion: null, turf: null, dirt: null, rainfallMm: null };
         byDay.set(key, e);
       }
       return e;
@@ -160,6 +187,7 @@ export function mergeBaba(
       const e = ensure(m.time);
       e.turf = m.turf;
       e.dirt = m.dirt;
+      e.rainfallMm = m.rainfallMm;
     }
     out.push({
       venueName,
@@ -207,17 +235,25 @@ export function selectMeasurement(
   return { measurement: venue.measurements[0], exact: false };
 }
 
-/** Dify へ渡す 1 行サマリ文字列を作る */
-export function formatBabaSummary(m: BabaMeasurement, exact: boolean): string {
-  const parts: string[] = [];
-  parts.push(`クッション値:${m.cushion ?? "不明"}`);
-  const fmtPair = (label: string, p: MoisturePair | null) => {
+/** remarks へ入れる 1 行サマリ文字列を作る */
+export function formatBabaSummary(m: BabaMeasurement): string {
+  const surface = (label: string, p: MoisturePair | null): string => {
     if (!p) return `${label}:不明`;
-    const cond = p.condition ? ` ${p.condition}` : "";
-    return `${label}(ゴール前/4角):${p.goal ?? "-"}/${p.corner4 ?? "-"}${cond}`;
+    const gj = conditionToJp(p.goalCondition);
+    const cj = conditionToJp(p.corner4Condition);
+    const g = p.goal ?? "-";
+    const c = p.corner4 ?? "-";
+    // ゴール前と 4 角の区分が同じならまとめて、違えば地点別に表記する。
+    if (gj && gj === cj) {
+      return `${label}:${gj}(含水率 ゴール前${g} 4角${c})`;
+    }
+    return `${label}:含水率 ゴール前${g}(${gj ?? "?"}) 4角${c}(${cj ?? "?"})`;
   };
-  parts.push(fmtPair("芝含水率", m.turf));
-  parts.push(fmtPair("ダート含水率", m.dirt));
-  const tag = exact ? "計測" : "直近参考";
-  return `${parts.join(" / ")} (${tag}:${m.time})`;
+  const parts = [
+    `クッション値${m.cushion ?? "不明"}`,
+    surface("芝", m.turf),
+    surface("ダート", m.dirt),
+  ];
+  if (m.rainfallMm != null) parts.push(`当日雨量${m.rainfallMm}mm`);
+  return `馬場[${m.time}] ${parts.join(" / ")}`;
 }

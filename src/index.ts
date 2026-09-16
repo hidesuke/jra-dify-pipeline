@@ -1,11 +1,6 @@
 import { authorizePredict } from "./access";
 import { getSchedulesForDate, type ScheduleItem } from "./schedules";
-import {
-  fetchBaba,
-  selectMeasurement,
-  formatBabaSummary,
-  type MoisturePair,
-} from "./baba";
+import { fetchBaba, selectMeasurement, formatBabaSummary } from "./baba";
 
 export type { ScheduleItem };
 
@@ -18,24 +13,12 @@ export interface Env {
   CF_ACCESS_AUD?: string;
   CF_ACCESS_ALLOWED_EMAIL?: string;
   PREDICT_SECRET?: string;
-  // "1" / "true" のとき、Dify へ馬場状態（クッション値・含水率）を付与する。
-  // 有効化する前に、Dify ワークフロー側に text 入力変数 `track_condition` を追加すること。
-  INCLUDE_BABA?: string;
 }
 
-export function babaEnabled(env: Env): boolean {
-  const v = env.INCLUDE_BABA?.trim().toLowerCase();
-  return v === "1" || v === "true" || v === "yes";
-}
-
-/** RaceMessage に載せる馬場サマリ */
+/** RaceMessage に載せる馬場サマリ（remarks へ差し込む） */
 export interface BabaAttachment {
-  summary: string; // Dify へ渡す 1 行テキスト
+  summary: string; // remarks に入れる 1 行テキスト
   measuredAt: string; // 計測時刻（生文字列）
-  exact: boolean; // true=対象日の実測値, false=直近の参考値
-  cushion: number | null;
-  turf: MoisturePair | null;
-  dirt: MoisturePair | null;
 }
 
 /** JST の暦日。extraDays=1 なら JST の翌日 */
@@ -71,12 +54,8 @@ async function loadBabaByVenue(
       const sel = selectMeasurement(venues, code, targetDate);
       if (!sel) continue;
       map.set(code, {
-        summary: formatBabaSummary(sel.measurement, sel.exact),
+        summary: formatBabaSummary(sel.measurement),
         measuredAt: sel.measurement.time,
-        exact: sel.exact,
-        cushion: sel.measurement.cushion,
-        turf: sel.measurement.turf,
-        dirt: sel.measurement.dirt,
       });
     }
   } catch (error) {
@@ -141,9 +120,7 @@ export default {
     const prefix = env.PREFIX_CODE || "pw01dde01";
     const messages: MessageSendRequest<RaceMessage>[] = [];
 
-    const babaByVenue = babaEnabled(env)
-      ? await loadBabaByVenue(targetDateKey, schedules.map((s) => s.venueCode))
-      : new Map<string, BabaAttachment>();
+    const babaByVenue = await loadBabaByVenue(targetDateKey, schedules.map((s) => s.venueCode));
 
     for (const schedule of schedules) {
       const raceList = generateRaceUrls(schedule, dateCompact, prefix);
@@ -168,17 +145,9 @@ export default {
   async queue(batch: MessageBatch<RaceMessage>, env: Env): Promise<void> {
     for (const msg of batch.messages) {
       const { targetDate, venueCode, raceNo, raceUrl, baba } = msg.body;
-      const babaLog = baba ? ` 馬場[${baba.summary}]` : "";
-      console.log(`Executing Dify API: ${targetDate} 場:${venueCode} ${raceNo}R ${raceUrl}${babaLog}`);
-
-      // baba がある場合のみ track_condition を追加する（既存の入力は不変）。
-      const inputs: Record<string, string> = {
-        url: raceUrl,
-        remarks: `${targetDate} 場:${venueCode} ${raceNo}R`
-      };
-      if (baba) {
-        inputs.track_condition = baba.summary;
-      }
+      // 馬場情報がある場合は remarks（備考欄）に追記する。
+      const remarks = `${targetDate} 場:${venueCode} ${raceNo}R${baba ? ` ｜ ${baba.summary}` : ""}`;
+      console.log(`Executing Dify API: ${remarks} ${raceUrl}`);
 
       try {
         const res = await fetch(env.DIFY_API_URL, {
@@ -188,7 +157,10 @@ export default {
             "Content-Type": "application/json"
           },
           body: JSON.stringify({
-            inputs,
+            inputs: {
+              url: raceUrl,
+              remarks
+            },
             query: `${targetDate} 場:${venueCode} ${raceNo}R`,
             response_mode: "blocking",
             user: "cloudflare-queue-worker"
@@ -310,9 +282,7 @@ async function enqueueRaces(req: Request, env: Env): Promise<Response> {
   const resolved = resolveRaces(req, env);
   if ("error" in resolved) return resolved.error;
 
-  const babaByVenue = babaEnabled(env)
-    ? await loadBabaByVenue(resolved.date, resolved.rows.map((r) => r.venueCode))
-    : new Map<string, BabaAttachment>();
+  const babaByVenue = await loadBabaByVenue(resolved.date, resolved.rows.map((r) => r.venueCode));
 
   const messages = resolved.rows.map(r => ({
     body: {
