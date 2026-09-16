@@ -2,6 +2,18 @@
   "name": "jra-dify-pipeline",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-01",
+  "vars": {
+    // Email Routing ドメイン上の From（検証済み Destination 宛て通知用）
+    "NOTIFY_FROM": "noreply@koumeinowana.info"
+  },
+  "send_email": [
+    {
+      // 検証済み Destination address 宛てに送信（自分宛通知）
+      "name": "EMAIL",
+      // ローカル wrangler dev でも本番 Email Service に接続する
+      "remote": true
+    }
+  ],
   "triggers": {
     "crons": [
       // Cloudflare の曜日は 1=日 … 7=土。数字の 5/6 は木/金になるので FRI/SAT を使う
