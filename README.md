@@ -70,7 +70,7 @@ npm install
 | npm script | 内容 |
 | --- | --- |
 | `npm run dev` | ローカル開発（`wrangler dev`） |
-| `npm run deploy` | Cloudflare へデプロイ |
+| `npm run deploy` | 手元から Cloudflare へデプロイ（普段は `main` へのマージで自動） |
 | `npm run tail` | 本番ログを購読 |
 | `npm test` | 1R 検証とシード逆算のローカルテスト |
 | `npm run cf-typegen` | Worker の型定義を生成 |
@@ -257,7 +257,9 @@ curl "https://jra-dify-pipeline.hdsk.workers.dev/baba?date=2026-09-13"
 
 ## Cloudflare へのデプロイ
 
-手順は公式の [Queues 入門](https://developers.cloudflare.com/queues/get-started/)、[Secrets](https://developers.cloudflare.com/workers/configuration/secrets/)、[Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/) に沿っています。`wrangler.jsonc` 側の producer / consumer / Cron 定義は済みです。
+GitHub の `main` にマージすると、Cloudflare が Worker を自動デプロイします（Workers Builds / Git 連携）。普段の反映は PR を `main` に入れるだけで十分です。`npm run deploy` は手元から出すときの手動手段です。シークレット（`wrangler secret put`）はデプロイでは上書きされないので、キーの追加・変更だけ別途必要です。
+
+初回セットアップの手順は公式の [Queues 入門](https://developers.cloudflare.com/queues/get-started/)、[Secrets](https://developers.cloudflare.com/workers/configuration/secrets/)、[Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/) に沿っています。`wrangler.jsonc` 側の producer / consumer / Cron 定義は済みです。
 
 ### 1. ログイン
 
@@ -300,7 +302,7 @@ npx wrangler deploy --secrets-file .env.production
 
 ### 4. Worker をデプロイ
 
-コード・Cron・Queue バインドの反映は `npm run deploy` です。シークレットは `secret put` 側です。
+通常は GitHub の `main` へマージすれば Cloudflare に出ます。手元から出す場合は `npm run deploy` です。シークレットは `secret put` 側です。
 
 ```bash
 npm run deploy
