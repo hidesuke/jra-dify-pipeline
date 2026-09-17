@@ -10,11 +10,11 @@
     // Cron メールに載せる /seed の origin
     "PUBLIC_BASE_URL": "https://jra-dify-pipeline.hdsk.workers.dev"
   },
-  // チェックサム seed と 1R 失敗セッション。本番 id は `npx wrangler kv namespace create checksum-seed`
+  // チェックサム seed と 1R 失敗セッション。binding 名は Worker の env.CHECKSUM_SEED と一致させる
   "kv_namespaces": [
     {
       "binding": "CHECKSUM_SEED",
-      "id": "checksum-seed-placeholder"
+      "id": "ad0ce28a8f2b444c9a4b45643bb2cd9e"
     }
   ],
   "send_email": [
