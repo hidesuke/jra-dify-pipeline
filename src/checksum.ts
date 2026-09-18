@@ -12,6 +12,13 @@ export const DEFAULT_PREFIX = "pw01dde01";
 export const JRA_ACCESS_ORIGIN = "https://jra.jp";
 export const JRA_ACCESS_PATH = "/JRADB/accessD.html";
 
+/** スマホは www.jra.go.jp、PC は jra.jp。生成 URL は従来どおり jra.jp に正規化する。 */
+const JRA_ACCESS_HOSTS = new Set(["jra.jp", "www.jra.jp", "jra.go.jp", "www.jra.go.jp"]);
+
+export function isJraAccessHost(hostname: string): boolean {
+  return JRA_ACCESS_HOSTS.has(hostname.trim().toLowerCase());
+}
+
 export interface ParsedRaceUrl {
   prefix: string;
   venueCode: string;
@@ -94,10 +101,13 @@ export function parseRaceUrl(input: string): ParseRaceUrlResult {
     return { ok: false, error: "URL として解釈できません" };
   }
 
-  if (url.origin !== JRA_ACCESS_ORIGIN || url.pathname !== JRA_ACCESS_PATH) {
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return { ok: false, error: "http または https の URL を入力してください" };
+  }
+  if (!isJraAccessHost(url.hostname) || url.pathname !== JRA_ACCESS_PATH) {
     return {
       ok: false,
-      error: `対応する URL は ${JRA_ACCESS_ORIGIN}${JRA_ACCESS_PATH}?CNAME=... です`,
+      error: `対応する URL は jra.jp または www.jra.go.jp の ${JRA_ACCESS_PATH}?CNAME=... です`,
     };
   }
 

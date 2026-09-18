@@ -184,7 +184,7 @@ Verified 2 venue 1R URL(s) for 2026-09-12
 URL 生成の加算定数（seed）は、正しい 1R URL から逆算できます。JRA 側の定数や未実装の月項が変わると 1R がエラーページになります。そのときだけ人手で更新し、次の失敗まで同じ seed を使います。
 
 1. メールのリンク `https://jra-dify-pipeline.hdsk.workers.dev/seed` を開く（Cloudflare Access）
-2. 失敗した場のうち、どれか 1 場の正しい 1R URL を貼る
+2. 失敗した場のうち、どれか 1 場の正しい 1R URL を貼る（PC の `jra.jp` でもスマホの `www.jra.go.jp` でも可）
 3. Worker が JRA で出馬表か確認し、seed を KV に保存する
 4. 失敗していた日付・場の URL を新しい seed で再生成し、Queue へ投入する
 

@@ -111,7 +111,7 @@ function formHtml(params: {
   ${errorBlock}
   <form method="post" action="/seed">
     <label for="url">正しい 1R URL</label>
-    <input id="url" name="url" type="url" required placeholder="https://jra.jp/JRADB/accessD.html?CNAME=..."${value}${disabled}>
+    <input id="url" name="url" type="url" required placeholder="https://www.jra.go.jp/JRADB/accessD.html?CNAME=..."${value}${disabled}>
     <button type="submit"${disabled}>シードを更新してキューに投入</button>
   </form>
 `;

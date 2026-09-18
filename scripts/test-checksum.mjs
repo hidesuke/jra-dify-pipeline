@@ -38,6 +38,11 @@ function generateRaceUrls(item, dateStrCompact, prefix = DEFAULT_PREFIX, seed = 
 
 function parseRaceUrl(input) {
   const url = new URL(input.trim());
+  const host = url.hostname.toLowerCase();
+  const allowed = host === "jra.jp" || host === "www.jra.jp" || host === "jra.go.jp" || host === "www.jra.go.jp";
+  if ((url.protocol !== "http:" && url.protocol !== "https:") || !allowed || url.pathname !== "/JRADB/accessD.html") {
+    return { error: "対応する URL は jra.jp または www.jra.go.jp" };
+  }
   const cname = url.searchParams.get("CNAME");
   const slash = cname.lastIndexOf("/");
   const body = cname.slice(0, slash);
@@ -66,6 +71,7 @@ function extractSeedFrom1R(parsed) {
 function validateSubmittedRaceUrl({ rawUrl, pending, expectedPrefix, getSchedule }) {
   if (pending.length === 0) return { ok: false, error: "補正待ちの 1R 失敗がありません" };
   const parsed = parseRaceUrl(rawUrl);
+  if (parsed.error) return { ok: false, error: parsed.error };
   if (parsed.raceNo !== 1) return { ok: false, error: "1R の URL を入力してください" };
   if (parsed.prefix !== expectedPrefix) return { ok: false, error: "prefix" };
   const match = pending.find(
@@ -161,9 +167,13 @@ function assert(cond, msg) {
 }
 
 function getSchedule(date, venueCode) {
-  if (date !== "2026-09-12") return undefined;
-  if (venueCode === "06") return schedule;
-  if (venueCode === "09") return hanshin;
+  if (date === "2026-09-12") {
+    if (venueCode === "06") return schedule;
+    if (venueCode === "09") return hanshin;
+  }
+  if (date === "2026-09-19" && venueCode === "06") {
+    return { venueCode: "06", year: 2026, kai: 4, nichi: 5 };
+  }
   return undefined;
 }
 
@@ -177,6 +187,22 @@ assert(urls[1].url.endsWith("/00"), `2R checksum is 1R-0x4B (got ${urls[1].url.s
 const parsed = parseRaceUrl(NAKAYAMA_1R);
 assert(parsed.venueCode === "06" && parsed.raceNo === 1 && parsed.date === "2026-09-12", "parse known 1R");
 assert(extractSeedFrom1R(parsed) === 0x16, "extract seed 0x16 from known 1R");
+
+const mobile =
+  "https://www.jra.go.jp/JRADB/accessD.html?CNAME=pw01dde0106202604050120260919/5C";
+const mobileParsed = parseRaceUrl(mobile);
+assert(
+  !mobileParsed.error &&
+    mobileParsed.venueCode === "06" &&
+    mobileParsed.date === "2026-09-19" &&
+    mobileParsed.checksumHex === "5C",
+  "parse smartphone www.jra.go.jp 1R"
+);
+assert(extractSeedFrom1R(mobileParsed) === 0xc0, `seed from mobile 1R is 0xC0 (got 0x${extractSeedFrom1R(mobileParsed).toString(16)})`);
+assert(
+  parseRaceUrl("https://example.com/JRADB/accessD.html?CNAME=pw01dde0106202604030120260912/4B").error,
+  "reject non-JRA host"
+);
 
 const shifted = generateRaceUrls(schedule, "20260912", DEFAULT_PREFIX, 0x17);
 assert(shifted[0].url !== NAKAYAMA_1R, "different seed changes 1R checksum");
@@ -199,6 +225,19 @@ const okSubmit = validateSubmittedRaceUrl({
   getSchedule,
 });
 assert(okSubmit.ok && okSubmit.seed === 0x16, "one venue 1R is enough to recover seed");
+
+const mobileOk = validateSubmittedRaceUrl({
+  rawUrl: mobile,
+  pending: [
+    {
+      date: "2026-09-19",
+      venues: [{ venueCode: "06", url: "https://jra.jp/generated-bad" }],
+    },
+  ],
+  expectedPrefix: DEFAULT_PREFIX,
+  getSchedule,
+});
+assert(mobileOk.ok && mobileOk.seed === 0xc0, "www.jra.go.jp 1R recovers seed");
 
 const race2 = validateSubmittedRaceUrl({
   rawUrl: urls[1].url,
