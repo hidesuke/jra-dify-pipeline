@@ -13,9 +13,10 @@ Cron（金・土 17:30 JST） ─┐
 GET /run（認証必須）      ─┴─→ KV の seed で URL 生成 → 各場1R検証 → jra-race-queue → Dify
                                                       └─ エラーページならメール（/seed リンク）＋その場をスキップ
 
-GET /       → 馬柱 URL の一覧のみ（キュー投入も予想もしない）
-GET /verify → 各場 1R の URL 検証のみ（認証必須・投入なし）
-GET /seed   → 失敗した場の正しい 1R URL を入れて seed を更新し、Queue へ再投入（Access 必須）
+GET /            → 馬柱 URL の一覧のみ（キュー投入も予想もしない）
+GET /baba/latest → 最新の馬場状態のみ（認証なし・AI / HTTP ツール向け）
+GET /verify      → 各場 1R の URL 検証のみ（認証必須・投入なし）
+GET /seed        → 失敗した場の正しい 1R URL を入れて seed を更新し、Queue へ再投入（Access 必須）
 ```
 
 | ハンドラ | 役割 |
@@ -25,6 +26,8 @@ GET /seed   → 失敗した場の正しい 1R URL を入れて seed を更新�
 | `GET /run` または `POST /run` | 同じ開催を Queue へ投入する。投入前に各場 1R の URL を検証する。ブラウザは Cloudflare Access、CLI は `Authorization: Bearer <PREDICT_SECRET>`。本文は `text/plain` で `Enqueued N races for YYYY-MM-DD` のあと `場コード:レース番号R URL` |
 | `GET /verify` または `POST /verify` | 各場 1R だけを検証する（Queue に載せない）。認証は `/run` と同じ。`?notify=1` で失敗時にメールも送る |
 | `GET /seed` または `POST /seed` | 1R がパラメータエラーだった場の正しい URL を入力する。認証は `/run` と同じ（Cloudflare Access または `PREDICT_SECRET`）。成功すると seed を KV に保存し、失敗していた場を Queue へ再投入する |
+| `GET /baba/latest` | 各場の**最新計測だけ**を JSON で返す。認証なし。Dify の HTTP リクエストツールなど AI から読む用。履歴やパース生データは含まない |
+| `GET /baba` | 馬場データの確認用ダンプ（全計測）。認証なし。キュー投入なし |
 | `queue` | Queue consumer。1 件ずつ Dify へ blocking POST。失敗時は最大 3 回リトライ |
 
 `GET /`・`/run`・`/verify` のクエリは同じです。`date=YYYY-MM-DD`（省略時は JST の今日）、`venue=06`（場コード 2 桁）、`race=1`（1〜12）。
@@ -92,7 +95,7 @@ npm install
 | `NOTIFY_EMAIL` | 通知用 | 馬柱 URL エラーの通知先。**Email Routing で Verify 済みの Destination address**。`wrangler.jsonc` の `vars` に定義（ダッシュボードと同期） |
 | `NOTIFY_FROM` | いいえ | 送信元。`koumeinowana.info` 上のアドレス。`wrangler.jsonc` の vars 既定は `noreply@koumeinowana.info` |
 
-`/run`・`/verify`・`/seed` は `CF_ACCESS_*` か `PREDICT_SECRET` の少なくとも一方が無いと `503` です。インデックス `/` は認証しません。
+`/run`・`/verify`・`/seed` は `CF_ACCESS_*` か `PREDICT_SECRET` の少なくとも一方が無いと `503` です。インデックス `/` と `/baba`・`/baba/latest` は認証しません。
 
 チェックサムの加算定数（seed）は Workers KV（バインディング `CHECKSUM_SEED`）に保持します。未設定時の初期値は `0x16` です。名前空間の表示名が違っていても、`wrangler.jsonc` の `binding` が `CHECKSUM_SEED` なら Worker から使えます。
 
@@ -244,12 +247,72 @@ curl -H "Authorization: Bearer $PREDICT_SECRET" \
 
 Cron は前日 17:30 に翌日分を投入します。クッション値は開催当日の朝に計測・公開されるため、17:30 時点ではその日の実測はまだ存在しません。そこで**対象日と同月日の計測があればそれを、無ければその時点の最新（直近）計測**を付与します。つまり 17:30 投入時は「その時点で公開されている最新の馬場データ」が入ります。
 
-### 確認用エンドポイント `GET /baba`
+### AI 向けエンドポイント `GET /baba/latest`
 
-取得・パースした馬場データを JSON で返します（認証なし・キュー投入なし・読み取り専用）。
+各場について **いま公開されている最新の計測 1 件だけ** を返します。認証なし・CORS 許可・キュー投入なし。Dify の HTTP リクエストツールやその他の AI から、開催当日朝に更新されたクッション値・含水率を読むための API です。過去の計測履歴は含めません。
+
+| クエリ | 必須 | 説明 |
+| --- | --- | --- |
+| `venue` | いいえ | 場コード 2 桁（`06`）または会場名（`中山` / `中山競馬場`）。省略時は JRA が掲載している全場 |
+| `format` | いいえ | `json`（既定）または `text`。`text` は `text` フィールドと同じ 1 行 1 場のプレーンテキスト |
+
+JSON の主なフィールド:
+
+| フィールド | 内容 |
+| --- | --- |
+| `fetchedAt` | この Worker が JRA を取りに行った時刻（ISO 8601） |
+| `text` | AI がそのまま読める日本語サマリ（1 場 1 行）。`remarks` に入れる馬場文字列と同じ形式 |
+| `venues[].venueCode` / `venueName` | 場コードと会場名 |
+| `venues[].measuredAt` | 計測時刻の生文字列 |
+| `venues[].cushion` | クッション値 |
+| `venues[].turf` / `dirt` | `condition`（良 / 稍重 / 重 / 不良）、ゴール前・4 角の含水率 |
+| `venues[].rainfallMm` | 当日雨量（mm）。注記が無い計測は `null` |
+| `venues[].usedCourse` / `turfLength` / `turfCondition` | 使用コース・芝丈・芝の状態 |
+| `venues[].summary` | その場の 1 行サマリ |
+
+`Cache-Control: public, max-age=300` です。未知の `venue` は `400`、その場の掲載が無いときは `404`、JRA 取得失敗は `502` です。
 
 ```bash
-# 全場の生データ
+# 全場の最新だけ（JSON）
+curl "https://jra-dify-pipeline.hdsk.workers.dev/baba/latest"
+# 中山だけ
+curl "https://jra-dify-pipeline.hdsk.workers.dev/baba/latest?venue=06"
+# プレーンテキスト（LLM に渡しやすい）
+curl "https://jra-dify-pipeline.hdsk.workers.dev/baba/latest?format=text"
+```
+
+成功時の JSON 例:
+
+```json
+{
+  "fetchedAt": "2026-09-18T12:00:00.000Z",
+  "text": "中山(06) 馬場[9月18日（金曜）10時30分] クッション値9.6 / 芝:良(含水率 ゴール前13.1 4角14.1) / ダート:良(含水率 ゴール前7.3 4角7.4)",
+  "venues": [
+    {
+      "venueCode": "06",
+      "venueName": "中山",
+      "measuredAt": "9月18日（金曜）10時30分",
+      "cushion": 9.6,
+      "turf": { "condition": "良", "goalCondition": "良", "corner4Condition": "良", "goal": 13.1, "corner4": 14.1 },
+      "dirt": { "condition": "良", "goalCondition": "良", "corner4Condition": "良", "goal": 7.3, "corner4": 7.4 },
+      "rainfallMm": null,
+      "usedCourse": "Bコース（Aコースから3メートル外に内柵を設置）",
+      "turfLength": "芝丈(cm) 芝野芝12から14 障害野芝12から14・洋芝12から16",
+      "turfCondition": "3コーナーから4コーナーの内柵沿いに傷みがあります。",
+      "summary": "馬場[9月18日（金曜）10時30分] クッション値9.6 / 芝:良(含水率 ゴール前13.1 4角14.1) / ダート:良(含水率 ゴール前7.3 4角7.4) / 使用コース:Bコース（Aコースから3メートル外に内柵を設置）"
+    }
+  ]
+}
+```
+
+Cloudflare Access は `/run` と `/seed` だけに付けてください。`/baba/latest` まで保護すると AI から認証なしで読めなくなります。
+
+### 確認用エンドポイント `GET /baba`
+
+パースした馬場データの全計測を JSON で返します（認証なし・キュー投入なし・読み取り専用）。AI からは `/baba/latest` を使ってください。
+
+```bash
+# 全場の生データ（履歴を含む）
 curl "https://jra-dify-pipeline.hdsk.workers.dev/baba"
 # 対象日について各場で選ばれる計測（同日 or 直近）も含める
 curl "https://jra-dify-pipeline.hdsk.workers.dev/baba?date=2026-09-13"
@@ -373,7 +436,7 @@ Cron の実行履歴は Worker の **Settings → Triggers** 付近の Cron Even
 
 ### Cloudflare Access（ブラウザ・無料枠）
 
-Zero Trust の **Free**（50 ユーザーまで）で、ホストの **パス `/run` と `/seed`** を保護できます。`workers.dev` も対象にできます。Worker 全体の Access は付けないでください。`/` までログイン必須になります。
+Zero Trust の **Free**（50 ユーザーまで）で、ホストの **パス `/run` と `/seed`** を保護できます。`workers.dev` も対象にできます。Worker 全体の Access は付けないでください。`/` や `/baba/latest` までログイン必須になります。
 
 `/run` 用のアプリに加え、同じポリシーでもう 1 つ **パス `seed`** のセルフホストアプリを追加します（AUD が別になるため）。
 
@@ -471,6 +534,8 @@ npm run dev
 
 ```bash
 curl "http://localhost:8787/?date=2026-09-12&venue=06&race=1"
+curl "http://localhost:8787/baba/latest"
+curl "http://localhost:8787/baba/latest?venue=06&format=text"
 curl -H "Authorization: Bearer local-dev-secret" \
   "http://localhost:8787/verify?date=2026-09-12"
 curl -H "Authorization: Bearer local-dev-secret" \

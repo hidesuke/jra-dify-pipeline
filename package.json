@@ -8,7 +8,7 @@
     "start": "wrangler dev",
     "deploy": "wrangler deploy",
     "tail": "wrangler tail",
-    "test": "node scripts/test-verify.mjs && node scripts/test-checksum.mjs",
+    "test": "node scripts/test-verify.mjs && node scripts/test-checksum.mjs && node --experimental-strip-types scripts/test-baba.mjs",
     "cf-typegen": "wrangler types"
   },
   "engines": {
