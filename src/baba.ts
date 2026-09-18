@@ -353,6 +353,116 @@ function formatTurfLength(tl: TurfLength): string | null {
   return parts.length ? `芝丈(cm) ${parts.join(" ")}` : null;
 }
 
+function formatTurfLengthText(tl: TurfLength | null | undefined): string | null {
+  if (!tl) return null;
+  return formatTurfLength(tl);
+}
+
+/** 含水率ペアを AI 向けの平坦な形にする */
+export interface LatestMoisture {
+  condition: string | null;
+  goalCondition: string | null;
+  corner4Condition: string | null;
+  goal: number | null;
+  corner4: number | null;
+}
+
+export function formatMoistureForApi(p: MoisturePair | null): LatestMoisture | null {
+  if (!p) return null;
+  const goalCondition = conditionToJp(p.goalCondition);
+  const corner4Condition = conditionToJp(p.corner4Condition);
+  return {
+    condition: goalCondition && goalCondition === corner4Condition ? goalCondition : goalCondition ?? corner4Condition,
+    goalCondition,
+    corner4Condition,
+    goal: p.goal,
+    corner4: p.corner4,
+  };
+}
+
+/** 会場フィルタ（場コード 2 桁、または会場名）。未知なら null */
+export function resolveVenueKey(raw: string): { venueCode?: string; venueName?: string } | null {
+  const v = raw.trim();
+  if (!v) return null;
+  if (/^\d{2}$/.test(v)) return { venueCode: v };
+  const venueName = v.replace(/競馬場$/, "");
+  if (VENUE_NAME_TO_CODE[venueName]) {
+    return { venueCode: VENUE_NAME_TO_CODE[venueName], venueName };
+  }
+  return null;
+}
+
+/** AI 向けの会場 1 件（最新計測のみ） */
+export interface LatestVenueBaba {
+  venueCode: string | null;
+  venueName: string;
+  measuredAt: string;
+  cushion: number | null;
+  turf: LatestMoisture | null;
+  dirt: LatestMoisture | null;
+  rainfallMm: number | null;
+  usedCourse: string | null;
+  turfLength: string | null;
+  turfCondition: string | null;
+  summary: string;
+}
+
+/** AI 向けの最新馬場レスポンス */
+export interface LatestBabaResponse {
+  fetchedAt: string;
+  text: string;
+  venues: LatestVenueBaba[];
+}
+
+/**
+ * 各場の最新計測だけを返す。venueFilter があればその場のみ。
+ * measurements は新しい順なので先頭を使う。
+ */
+export function buildLatestBaba(
+  venues: VenueBaba[],
+  courseByVenue: Map<string, CourseInfo> = new Map(),
+  opts?: { fetchedAt?: string; venueFilter?: string }
+): LatestBabaResponse {
+  const fetchedAt = opts?.fetchedAt ?? new Date().toISOString();
+  const key = opts?.venueFilter ? resolveVenueKey(opts.venueFilter) : undefined;
+  if (opts?.venueFilter && !key) {
+    return { fetchedAt, text: "", venues: [] };
+  }
+
+  const selected = key
+    ? venues.filter(
+        (v) =>
+          (key.venueCode && v.venueCode === key.venueCode) ||
+          (key.venueName && v.venueName === key.venueName)
+      )
+    : venues;
+
+  const items: LatestVenueBaba[] = [];
+  for (const v of selected) {
+    const m = v.measurements[0];
+    if (!m) continue;
+    const course = (v.venueCode && courseByVenue.get(v.venueCode)) || null;
+    items.push({
+      venueCode: v.venueCode,
+      venueName: v.venueName,
+      measuredAt: m.time,
+      cushion: m.cushion,
+      turf: formatMoistureForApi(m.turf),
+      dirt: formatMoistureForApi(m.dirt),
+      rainfallMm: m.rainfallMm,
+      usedCourse: course?.usedCourse ?? null,
+      turfLength: formatTurfLengthText(course?.turfLength),
+      turfCondition: course?.turfCondition ?? null,
+      summary: formatBabaSummary(m, course),
+    });
+  }
+
+  const text = items
+    .map((v) => `${v.venueName}${v.venueCode ? `(${v.venueCode})` : ""} ${v.summary}`)
+    .join("\n");
+  return { fetchedAt, text, venues: items };
+}
+
 /** remarks へ入れる 1 行サマリ文字列を作る */
 export function formatBabaSummary(m: BabaMeasurement, course?: CourseInfo | null): string {
   const surface = (label: string, p: MoisturePair | null): string => {

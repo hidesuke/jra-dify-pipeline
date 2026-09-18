@@ -1,6 +1,13 @@
 import { authorizePredict } from "./access";
 import { getSchedulesForDate, type ScheduleItem } from "./schedules";
-import { fetchBaba, fetchCourseInfoByVenue, selectMeasurement, formatBabaSummary } from "./baba";
+import {
+  fetchBaba,
+  fetchCourseInfoByVenue,
+  selectMeasurement,
+  formatBabaSummary,
+  buildLatestBaba,
+  resolveVenueKey,
+} from "./baba";
 import { notifyRaceUrlFailures } from "./notify";
 import { verifyVenue1RUrls, type RaceUrlCheck } from "./verifyRaceUrl";
 import {
@@ -222,6 +229,14 @@ export default {
       return handleSeedRequest(req, env, (seed, pending) => enqueueAfterSeedUpdate(env, seed, pending));
     }
 
+    if (path === "/baba/latest") {
+      if (req.method === "OPTIONS") return corsPreflight();
+      if (req.method !== "GET" && req.method !== "HEAD") {
+        return new Response("Method not allowed\n", { status: 405, headers: publicHeaders("text/plain; charset=utf-8") });
+      }
+      return babaLatest(req);
+    }
+
     if (path === "/baba") {
       return babaDebug(req);
     }
@@ -348,6 +363,70 @@ async function enqueueAfterSeedUpdate(
     );
   }
   return results;
+}
+
+function publicHeaders(contentType: string, extra?: Record<string, string>): HeadersInit {
+  return {
+    "Content-Type": contentType,
+    "Cache-Control": "public, max-age=300",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    ...extra,
+  };
+}
+
+function corsPreflight(): Response {
+  return new Response(null, { status: 204, headers: publicHeaders("text/plain; charset=utf-8") });
+}
+
+function publicJson(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: publicHeaders("application/json; charset=utf-8"),
+  });
+}
+
+// GET /baba/latest : 各場の最新計測だけを返す（認証なし・AI / HTTP ツール向け）。
+// ?venue=06 または ?venue=中山 で 1 場に絞る。?format=text で text/plain。
+async function babaLatest(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+  const venue = url.searchParams.get("venue") || undefined;
+  const format = (url.searchParams.get("format") || "json").toLowerCase();
+
+  if (venue && !resolveVenueKey(venue)) {
+    const body = { error: `unknown venue: ${venue}`, venues: [] as const };
+    if (format === "text") {
+      return new Response(`unknown venue: ${venue}\n`, {
+        status: 400,
+        headers: publicHeaders("text/plain; charset=utf-8"),
+      });
+    }
+    return publicJson(body, 400);
+  }
+
+  try {
+    const [venues, courseByVenue] = await Promise.all([fetchBaba(), fetchCourseInfoByVenue()]);
+    const payload = buildLatestBaba(venues, courseByVenue, { venueFilter: venue });
+    if (venue && payload.venues.length === 0) {
+      const msg = `no baba data for venue: ${venue}`;
+      if (format === "text") {
+        return new Response(`${msg}\n`, { status: 404, headers: publicHeaders("text/plain; charset=utf-8") });
+      }
+      return publicJson({ error: msg, fetchedAt: payload.fetchedAt, text: "", venues: [] }, 404);
+    }
+    if (format === "text") {
+      const body = payload.text ? `${payload.text}\n` : "";
+      return new Response(body, { status: 200, headers: publicHeaders("text/plain; charset=utf-8") });
+    }
+    return publicJson(payload);
+  } catch (error) {
+    const msg = `baba fetch error: ${error}`;
+    if (format === "text") {
+      return new Response(`${msg}\n`, { status: 502, headers: publicHeaders("text/plain; charset=utf-8") });
+    }
+    return publicJson({ error: msg }, 502);
+  }
 }
 
 // GET /baba : 取得・パースした馬場データを JSON で返す（読み取り専用・認証なし）。
