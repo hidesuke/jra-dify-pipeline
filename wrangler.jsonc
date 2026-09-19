@@ -28,8 +28,8 @@
   "triggers": {
     "crons": [
       // Cloudflare の曜日は 1=日 … 7=土。数字の 5/6 は木/金になるので FRI/SAT を使う
-      "30 8 * * FRI", // 金曜 17:30 JST
-      "30 8 * * SAT"  // 土曜 17:30 JST
+      "0 8 * * FRI", // 金曜 17:00 JST
+      "0 8 * * SAT"  // 土曜 17:00 JST
     ]
   },
   "queues": {
