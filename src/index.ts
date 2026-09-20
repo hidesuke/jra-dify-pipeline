@@ -22,6 +22,12 @@ import {
   type PendingCorrection,
 } from "./seedStore";
 import { handleSeedRequest, type SeedEnqueueResult } from "./seedForm";
+import {
+  acceptsHtml,
+  renderKickForm,
+  renderKickResult,
+  wantsKickForm,
+} from "./kickForm";
 
 export type { ScheduleItem };
 
@@ -206,14 +212,35 @@ export default {
     }
   },
 
-  // 3. GET / は馬柱 URL の一覧のみ。予想は GET|POST /run（認証必須）
+  // 3. GET / は馬柱 URL の一覧のみ。予想は GET|POST /run（認証必須）。
+  //    ブラウザの /kick とクエリ無し GET /run はキック用フォーム。
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
 
+    if (path === "/kick") {
+      const denied = await authorizePredict(req, env, ctx);
+      if (denied) return denied;
+      if (req.method === "GET" || req.method === "HEAD") {
+        return renderKickForm({
+          todayKey: jstDateKey(),
+          selectedDate: url.searchParams.get("date") || undefined,
+          selectedVenue: url.searchParams.get("venue") || undefined,
+          selectedRace: url.searchParams.get("race") || undefined,
+        });
+      }
+      if (req.method === "POST") {
+        return enqueueRaces(req, env);
+      }
+      return new Response("Method not allowed\n", { status: 405, headers: { Allow: "GET, POST" } });
+    }
+
     if (path === "/run") {
       const denied = await authorizePredict(req, env, ctx);
       if (denied) return denied;
+      if (wantsKickForm(req)) {
+        return renderKickForm({ todayKey: jstDateKey() });
+      }
       return enqueueRaces(req, env);
     }
 
@@ -451,42 +478,104 @@ async function babaDebug(req: Request): Promise<Response> {
   }
 }
 
-async function resolveRaces(req: Request, env: Env): Promise<{ error: Response } | { date: string; rows: RaceRow[] }> {
-  const url = new URL(req.url);
-  const targetDateKey = url.searchParams.get("date") || jstDateKey();
-  const venueFilter = url.searchParams.get("venue");
-  const raceFilter = url.searchParams.get("race");
+async function requestParams(req: Request): Promise<URLSearchParams> {
+  const params = new URLSearchParams(new URL(req.url).searchParams);
+  const ct = req.headers.get("Content-Type") ?? "";
+  if (
+    req.method === "POST" &&
+    (ct.includes("application/x-www-form-urlencoded") || ct.includes("multipart/form-data"))
+  ) {
+    try {
+      const form = await req.formData();
+      for (const [key, value] of form.entries()) {
+        if (typeof value !== "string") continue;
+        const trimmed = value.trim();
+        if (!trimmed) continue;
+        if (!params.has(key)) params.set(key, trimmed);
+      }
+    } catch {
+      // 読めない body はクエリだけ使う
+    }
+  }
+  return params;
+}
+
+function kickSelectionFromParams(params: URLSearchParams) {
+  return {
+    selectedDate: params.get("date") || undefined,
+    selectedVenue: params.get("venue") || undefined,
+    selectedRace: params.get("race") || undefined,
+  };
+}
+
+async function resolveRaces(
+  req: Request,
+  env: Env
+): Promise<
+  | { date: string; rows: RaceRow[]; params: URLSearchParams }
+  | { error: string; status: number; params: URLSearchParams }
+> {
+  const params = await requestParams(req);
+  const targetDateKey = params.get("date") || jstDateKey();
+  const venueFilter = params.get("venue");
+  const raceFilter = params.get("race");
   const schedules = getSchedulesForDate(targetDateKey);
 
   if (!schedules) {
-    return { error: new Response(`No schedule found for date: ${targetDateKey}`, { status: 404 }) };
+    return { error: `No schedule found for date: ${targetDateKey}`, status: 404, params };
   }
 
   const selected = venueFilter
     ? schedules.filter(s => s.venueCode === venueFilter)
     : schedules;
   if (selected.length === 0) {
-    return { error: new Response(`No venue ${venueFilter} on ${targetDateKey}`, { status: 404 }) };
+    return { error: `No venue ${venueFilter} on ${targetDateKey}`, status: 404, params };
   }
 
   const raceNo = raceFilter ? Number(raceFilter) : undefined;
   if (raceFilter && (!Number.isInteger(raceNo) || raceNo! < 1 || raceNo! > 12)) {
-    return { error: new Response(`Invalid race: ${raceFilter}`, { status: 400 }) };
+    return { error: `Invalid race: ${raceFilter}`, status: 400, params };
   }
 
   const seed = await getStoredSeed(env.CHECKSUM_SEED);
   const rows = await rowsForSchedules(selected, targetDateKey, env, seed, raceNo);
 
   if (rows.length === 0) {
-    return { error: new Response(`No races matched for ${targetDateKey}`, { status: 404 }) };
+    return { error: `No races matched for ${targetDateKey}`, status: 404, params };
   }
 
-  return { date: targetDateKey, rows };
+  return { date: targetDateKey, rows, params };
+}
+
+function plainOrKickError(
+  req: Request,
+  resolved: { error: string; status: number; params: URLSearchParams }
+): Response {
+  if (acceptsHtml(req)) {
+    return renderKickForm(
+      {
+        todayKey: jstDateKey(),
+        error: resolved.error,
+        ...kickSelectionFromParams(resolved.params),
+      },
+      resolved.status
+    );
+  }
+  return new Response(resolved.error, { status: resolved.status });
+}
+
+function plainOrKickResult(req: Request, ok: boolean, text: string, status: number, error?: string): Response {
+  if (acceptsHtml(req)) {
+    return renderKickResult({ ok, text, status, error });
+  }
+  return new Response(text, { status });
 }
 
 async function listRaceUrls(req: Request, env: Env): Promise<Response> {
   const resolved = await resolveRaces(req, env);
-  if ("error" in resolved) return resolved.error;
+  if ("error" in resolved) {
+    return new Response(resolved.error, { status: resolved.status });
+  }
 
   const body = `${resolved.rows.map((r) => r.url).join("\n")}\n`;
   return new Response(body, {
@@ -497,17 +586,15 @@ async function listRaceUrls(req: Request, env: Env): Promise<Response> {
 
 async function enqueueRaces(req: Request, env: Env): Promise<Response> {
   const resolved = await resolveRaces(req, env);
-  if ("error" in resolved) return resolved.error;
+  if ("error" in resolved) return plainOrKickError(req, resolved);
 
   const { rows, checks } = await filterRowsBy1RVerification(env, resolved.date, resolved.rows, req.url);
   logVerification(resolved.date, checks);
 
   if (rows.length === 0) {
     const detail = formatVerifyLines(checks);
-    return new Response(
-      `No races enqueued for ${resolved.date} (1R URL verification failed)\n${detail}\n`,
-      { status: 422 }
-    );
+    const text = `No races enqueued for ${resolved.date} (1R URL verification failed)\n${detail}\n`;
+    return plainOrKickResult(req, false, text, 422, "1R URL の検証に失敗したため投入しませんでした。");
   }
 
   const babaByVenue = await loadBabaByVenue(resolved.date, rows.map((r) => r.venueCode));
@@ -537,16 +624,16 @@ async function enqueueRaces(req: Request, env: Env): Promise<Response> {
       return `${r.venueCode}:${r.raceNo}R ${r.url}${baba ? ` | ${baba.summary}` : ""}`;
     })
     .join("\n");
-  return new Response(
-    `Enqueued ${messages.length} races for ${resolved.date}\n${skipNote}${verifyBlock}${preview}\n`,
-    { status: 200 }
-  );
+  const text = `Enqueued ${messages.length} races for ${resolved.date}\n${skipNote}${verifyBlock}${preview}\n`;
+  return plainOrKickResult(req, true, text, 200);
 }
 
 /** GET|POST /verify : 各場 1R の URL 検証のみ（キュー投入なし・認証必須） */
 async function verifyRaces(req: Request, env: Env): Promise<Response> {
   const resolved = await resolveRaces(req, env);
-  if ("error" in resolved) return resolved.error;
+  if ("error" in resolved) {
+    return new Response(resolved.error, { status: resolved.status });
+  }
 
   const checks = await verifyVenue1RUrls(resolved.rows);
   logVerification(resolved.date, checks);

@@ -35,7 +35,7 @@ function getAccessJwt(req: Request): string | null {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
-/** `/run` と `/seed` など Access アプリが複数あるときはカンマ区切り */
+/** `/run` と `/seed`・`/kick` など Access アプリが複数あるときはカンマ区切り */
 export function configuredAccessAuds(env: PredictAuthEnv): string[] {
   return (env.CF_ACCESS_AUD ?? "")
     .split(",")
@@ -112,7 +112,7 @@ export function predictAuthConfigured(env: PredictAuthEnv): boolean {
 }
 
 /**
- * `/run`・`/verify`・`/seed` を通してよければ null。拒否なら Response。
+ * `/run`・`/kick`・`/verify`・`/seed` を通してよければ null。拒否なら Response。
  * Access 未設定のまま公開しない。
  */
 export async function authorizePredict(

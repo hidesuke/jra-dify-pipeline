@@ -10,10 +10,11 @@ JRA の開催日ごとに公式レースページ URL を組み立て、Cloudfla
 
 ```
 Cron（金・土 17:00 JST） ─┐
-GET /run（認証必須）      ─┴─→ KV の seed で URL 生成 → 各場1R検証 → jra-race-queue → Dify
-                                                      └─ エラーページならメール（/seed リンク）＋その場をスキップ
+GET|POST /run（認証必須） ─┴─→ KV の seed で URL 生成 → 各場1R検証 → jra-race-queue → Dify
+GET|POST /kick（フォーム）─┘                         └─ エラーページならメール（/seed リンク）＋その場をスキップ
 
 GET /            → 馬柱 URL の一覧のみ（キュー投入も予想もしない）
+GET /kick        → 今週の開催から日付・場・レースを選んで投入する画面（Access 必須・スマホ向け）
 GET /baba/latest → 最新の馬場状態のみ（認証なし・AI / HTTP ツール向け）
 GET /verify      → 各場 1R の URL 検証のみ（認証必須・投入なし）
 GET /seed        → 失敗した場の正しい 1R URL を入れて seed を更新し、Queue へ再投入（Access 必須）
@@ -23,14 +24,15 @@ GET /seed        → 失敗した場の正しい 1R URL を入れて seed を更
 | --- | --- |
 | `scheduled` | Cloudflare Cron が呼ぶ。HTTP ではない。JST 翌日の開催を Queue へ投入する |
 | `GET /` | 馬柱 URL の一覧。Queue にも Dify にも載せない。本文は `text/plain` で URL のみ（1 行 1 URL） |
-| `GET /run` または `POST /run` | 同じ開催を Queue へ投入する。投入前に各場 1R の URL を検証する。ブラウザは Cloudflare Access、CLI は `Authorization: Bearer <PREDICT_SECRET>`。本文は `text/plain` で `Enqueued N races for YYYY-MM-DD` のあと `場コード:レース番号R URL` |
+| `GET /kick` または `POST /kick` | スマホ向けの予想キック画面。今週（月曜〜日曜＋週明け月曜の祝日開催）の日付・場・レースをセレクトで選んで投入する。場とレース番号は未指定ならその日の全候補。認証は `/run` と同じ。画面から馬場状態・シード補正へも移れる |
+| `GET /run` または `POST /run` | 同じ開催を Queue へ投入する。投入前に各場 1R の URL を検証する。ブラウザは Cloudflare Access、CLI は `Authorization: Bearer <PREDICT_SECRET>`。ブラウザでクエリ無しの `GET /run` は `/kick` と同じフォーム。CLI や `?date=` 付き、`POST` は投入。本文は `text/plain`（ブラウザは HTML）で `Enqueued N races for YYYY-MM-DD` のあと `場コード:レース番号R URL` |
 | `GET /verify` または `POST /verify` | 各場 1R だけを検証する（Queue に載せない）。認証は `/run` と同じ。`?notify=1` で失敗時にメールも送る |
 | `GET /seed` または `POST /seed` | 1R がパラメータエラーだった場の正しい URL を入力する。認証は `/run` と同じ（Cloudflare Access または `PREDICT_SECRET`）。成功すると seed を KV に保存し、失敗していた場を Queue へ再投入する |
 | `GET /baba/latest` | 各場の**最新計測だけ**を JSON で返す。認証なし。Dify の HTTP リクエストツールなど AI から読む用。履歴やパース生データは含まない |
 | `GET /baba` | 馬場データの確認用ダンプ（全計測）。認証なし。キュー投入なし |
 | `queue` | Queue consumer。1 件ずつ Dify へ blocking POST。失敗時は最大 3 回リトライ |
 
-`GET /`・`/run`・`/verify` のクエリは同じです。`date=YYYY-MM-DD`（省略時は JST の今日）、`venue=06`（場コード 2 桁）、`race=1`（1〜12）。
+`GET /`・`/run`・`/verify` のクエリは同じです。`/kick` のフォームも同じ項目を POST します。`date=YYYY-MM-DD`（省略時は JST の今日）、`venue=06`（場コード 2 桁）、`race=1`（1〜12）。
 
 成功時の本文例:
 
@@ -51,7 +53,7 @@ Enqueued 1 races for 2026-09-12
 
 データの出典は JRA の年度開催日割 PDF（[2026年](https://www.jra.go.jp/keiba/program/2026/pdf/nittei.pdf)、変更版 2026.9.6）です。2026 年は全年 109 開催日（札幌〜小倉）を収録しています。回次・日次が 1 つでもずれるとレース URL のチェックサムが崩れるため、更新時は PDF 巻末の「回 / 日」集計表と件数が一致するか確認してください。
 
-Cron は金・土 17:00 JST（`0 8 * * FRI` / `0 8 * * SAT` UTC）です。Cloudflare の曜日番号は Unix と違い **1=日曜 … 7=土曜** なので、数字の `5`/`6` は木・金になります。曜日は `FRI` / `SAT` で指定してください。月曜開催（例: 2026-09-21 敬老の日、10-12 スポーツの日、11-23 勤労感謝の日、11-30）は自動では流れないので、認証付きの `/run` を使ってください。2026-12-28 は開催なしです。
+Cron は金・土 17:00 JST（`0 8 * * FRI` / `0 8 * * SAT` UTC）です。Cloudflare の曜日番号は Unix と違い **1=日曜 … 7=土曜** なので、数字の `5`/`6` は木・金になります。曜日は `FRI` / `SAT` で指定してください。月曜開催（例: 2026-09-21 敬老の日、10-12 スポーツの日、11-23 勤労感謝の日、11-30）は自動では流れないので、`/kick` か認証付きの `/run` を使ってください。2026-12-28 は開催なしです。
 
 止めるときは `wrangler.jsonc` の `crons` を `[]` にして `npm run deploy` します。`crons` キーを消すだけだと、既存のトリガーが残ります。
 
@@ -88,14 +90,14 @@ npm install
 | `DIFY_API_URL` | はい | Workflow 実行エンドポイント。`https://api.dify.ai/v1/workflows/run` |
 | `PREFIX_CODE` | いいえ | JRA CNAME の接頭辞。未設定時は `pw01dde01` |
 | `PUBLIC_BASE_URL` | いいえ | 失敗メールに載せる Worker の origin。既定は `https://jra-dify-pipeline.hdsk.workers.dev` |
-| `CF_ACCESS_TEAM_DOMAIN` | `/run`・`/seed` 用 | Zero Trust のチーム URL。例: `https://<team>.cloudflareaccess.com` |
-| `CF_ACCESS_AUD` | `/run`・`/seed` 用 | Access アプリケーションの Audience（AUD）タグ。`/run` と `/seed` でアプリが分かれる場合はカンマ区切り |
+| `CF_ACCESS_TEAM_DOMAIN` | `/run`・`/kick`・`/seed` 用 | Zero Trust のチーム URL。例: `https://<team>.cloudflareaccess.com` |
+| `CF_ACCESS_AUD` | `/run`・`/kick`・`/seed` 用 | Access アプリケーションの Audience（AUD）タグ。パスごとにアプリが分かれる場合はカンマ区切り |
 | `CF_ACCESS_ALLOWED_EMAIL` | いいえ | 許可するメール。未設定なら Access を通ったユーザーなら可。通知先のフォールバックにも使う |
-| `PREDICT_SECRET` | `/run`・`/seed` 用（代替） | 自分で決めた共有秘密。Cloudflare からは発行されない。CLI では `Authorization: Bearer` に付ける |
+| `PREDICT_SECRET` | `/run`・`/kick`・`/seed` 用（代替） | 自分で決めた共有秘密。Cloudflare からは発行されない。CLI では `Authorization: Bearer` に付ける |
 | `NOTIFY_EMAIL` | 通知用 | 馬柱 URL エラーの通知先。**Email Routing で Verify 済みの Destination address**。`wrangler.jsonc` の `vars` に定義（ダッシュボードと同期） |
 | `NOTIFY_FROM` | いいえ | 送信元。`koumeinowana.info` 上のアドレス。`wrangler.jsonc` の vars 既定は `noreply@koumeinowana.info` |
 
-`/run`・`/verify`・`/seed` は `CF_ACCESS_*` か `PREDICT_SECRET` の少なくとも一方が無いと `503` です。インデックス `/` と `/baba`・`/baba/latest` は認証しません。
+`/run`・`/kick`・`/verify`・`/seed` は `CF_ACCESS_*` か `PREDICT_SECRET` の少なくとも一方が無いと `503` です。インデックス `/` と `/baba`・`/baba/latest` は認証しません。
 
 チェックサムの加算定数（seed）は Workers KV（バインディング `CHECKSUM_SEED`）に保持します。未設定時の初期値は `0x16` です。名前空間の表示名が違っていても、`wrangler.jsonc` の `binding` が `CHECKSUM_SEED` なら Worker から使えます。
 
@@ -305,7 +307,7 @@ curl "https://jra-dify-pipeline.hdsk.workers.dev/baba/latest?format=text"
 }
 ```
 
-Cloudflare Access は `/run` と `/seed` だけに付けてください。`/baba/latest` まで保護すると AI から認証なしで読めなくなります。
+Cloudflare Access は `/run`・`/kick`・`/seed` だけに付けてください。`/baba/latest` まで保護すると AI から認証なしで読めなくなります。
 
 ### 確認用エンドポイント `GET /baba`
 
@@ -424,7 +426,13 @@ Cron の実行履歴は Worker の **Settings → Triggers** 付近の Cron Even
 
 `GET /` は馬柱 URL を 1 行ずつ返すプレーンテキストです。Queue にも載せません。
 
-予想（キュー投入）は `/run` だけです。認証が無いと動きません。
+予想（キュー投入）は `/run`（とスマホ向けフォーム `/kick`）です。認証が無いと動きません。
+
+### スマホからキックする（`/kick`）
+
+外出先では `https://jra-dify-pipeline.hdsk.workers.dev/kick` を開きます（Cloudflare Access）。今週の開催日から日付を選び、場とレース番号は空（全ての場 / 全レース）のままでも実行できます。同じ画面から馬場状態とシード補正にも行けます。
+
+ブラウザでクエリ無しの `/run` を開いても同じフォームになります。`?date=` を付けた `/run` や `curl` は従来どおりすぐ投入します。
 
 | クエリ | 必須 | 説明 |
 | --- | --- | --- |
@@ -436,13 +444,13 @@ Cron の実行履歴は Worker の **Settings → Triggers** 付近の Cron Even
 
 ### Cloudflare Access（ブラウザ・無料枠）
 
-Zero Trust の **Free**（50 ユーザーまで）で、ホストの **パス `/run` と `/seed`** を保護できます。`workers.dev` も対象にできます。Worker 全体の Access は付けないでください。`/` や `/baba/latest` までログイン必須になります。
+Zero Trust の **Free**（50 ユーザーまで）で、ホストの **パス `/run`・`/kick`・`/seed`** を保護できます。`workers.dev` も対象にできます。Worker 全体の Access は付けないでください。`/` や `/baba/latest` までログイン必須になります。
 
-`/run` 用のアプリに加え、同じポリシーでもう 1 つ **パス `seed`** のセルフホストアプリを追加します（AUD が別になるため）。
+`/run` 用のアプリに加え、同じポリシーで **パス `kick`** と **パス `seed`** のセルフホストアプリを追加します（AUD が別になるため）。`/kick` をまだ足していない間は、ブラウザで `/run` を開けば同じフォームが出ます。
 
 1. [Zero Trust](https://one.dash.cloudflare.com/) → Access → Applications → アプリケーションを追加
 2. **セルフホストとプライベート** → **パブリックDNS**（プライベート宛先や Workers 全体保護は選ばない）
-3. サブドメイン: `jra-dify-pipeline`、ドメイン: `hdsk.workers.dev`、パス: `run`（同様にもう 1 つパス `seed`）
+3. サブドメイン: `jra-dify-pipeline`、ドメイン: `hdsk.workers.dev`、パス: `run`（同様にパス `kick` と `seed`）
 4. ポリシー: Action Allow、Include → **Emails** に自分のメール
 5. App Launcher / Cloudflare One Client 認証 / クライアントレスアクセスはオフ
 6. 発行された **Application Audience (AUD) Tag** と、Settings の **Team domain**（`https://<team>.cloudflareaccess.com`）を控える
@@ -451,11 +459,11 @@ Zero Trust の **Free**（50 ユーザーまで）で、ホストの **パス `/
 ```bash
 npx wrangler secret put CF_ACCESS_TEAM_DOMAIN
 npx wrangler secret put CF_ACCESS_AUD
-# /run と /seed で AUD が違う場合はカンマ区切り: <run-aud>,<seed-aud>
+# /run と /kick と /seed で AUD が違う場合はカンマ区切り: <run-aud>,<kick-aud>,<seed-aud>
 npx wrangler secret put CF_ACCESS_ALLOWED_EMAIL
 ```
 
-ブラウザで `https://jra-dify-pipeline.hdsk.workers.dev/run?date=2026-09-13` を開くと Cloudflare のログイン画面になります。Worker は `Cf-Access-Jwt-Assertion` を検証します。
+ブラウザで `https://jra-dify-pipeline.hdsk.workers.dev/kick`（またはクエリ無しの `/run`）を開くと Cloudflare のログイン画面になります。Worker は `Cf-Access-Jwt-Assertion` を検証します。
 
 Access を通したあとの `curl` には [Service Token](https://developers.cloudflare.com/cloudflare-one/identity/service-tokens/) か、下の `PREDICT_SECRET` を使います。
 
@@ -540,6 +548,8 @@ curl -H "Authorization: Bearer local-dev-secret" \
   "http://localhost:8787/verify?date=2026-09-12"
 curl -H "Authorization: Bearer local-dev-secret" \
   "http://localhost:8787/run?date=2026-09-12&venue=06&race=1"
+curl -H "Authorization: Bearer local-dev-secret" -H "Accept: text/html" \
+  "http://localhost:8787/kick"
 curl -H "Authorization: Bearer local-dev-secret" \
   "http://localhost:8787/seed"
 ```
