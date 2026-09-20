@@ -14,6 +14,7 @@ import {
   type PendingCorrection,
   type SeedKv,
 } from "./seedStore";
+import { escapeHtml, htmlPage } from "./html";
 
 export interface SeedFormEnv {
   CHECKSUM_SEED?: SeedKv;
@@ -33,46 +34,6 @@ export type EnqueueAfterSeed = (
   seed: number,
   pending: PendingCorrection[]
 ) => Promise<SeedEnqueueResult[]>;
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
-function htmlPage(title: string, body: string, status = 200): Response {
-  const html = `<!DOCTYPE html>
-<html lang="ja">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${escapeHtml(title)}</title>
-  <style>
-    :root { color-scheme: light dark; }
-    body { font-family: system-ui, sans-serif; max-width: 44rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
-    h1 { font-size: 1.25rem; }
-    label { display: block; font-weight: 600; margin-top: 1rem; }
-    input[type=url] { width: 100%; box-sizing: border-box; padding: 0.5rem; margin-top: 0.35rem; }
-    button { margin-top: 1rem; padding: 0.5rem 1rem; }
-    .muted { color: #666; }
-    .error { color: #b00020; }
-    .ok { color: #0b6b2c; }
-    code, pre { word-break: break-all; }
-    ul { padding-left: 1.2rem; }
-  </style>
-</head>
-<body>
-${body}
-</body>
-</html>
-`;
-  return new Response(html, {
-    status,
-    headers: { "Content-Type": "text/html; charset=utf-8" },
-  });
-}
 
 function pendingListHtml(pending: PendingCorrection[]): string {
   if (pending.length === 0) {
@@ -114,6 +75,10 @@ function formHtml(params: {
     <input id="url" name="url" type="url" required placeholder="https://www.jra.go.jp/JRADB/accessD.html?CNAME=..."${value}${disabled}>
     <button type="submit"${disabled}>シードを更新してキューに投入</button>
   </form>
+  <nav class="links" aria-label="他の機能">
+    <a href="/kick">予想を実行</a>
+    <a href="/baba/latest?format=text">馬場状態を見る</a>
+  </nav>
 `;
 }
 
@@ -210,7 +175,11 @@ export async function handleSeedRequest(
   <h1>シードを更新しました</h1>
   <p>新しいシード: <code>0x${escapeHtml(newHex)}</code>（次の 1R エラーまで保持します）</p>
   ${blocks || "<p>投入対象はありませんでした。</p>"}
-  <p><a href="/seed">補正ページに戻る</a></p>
+  <p><a class="btn" href="/seed">補正ページに戻る</a></p>
+  <nav class="links" aria-label="他の機能">
+    <a href="/kick">予想を実行</a>
+    <a href="/baba/latest?format=text">馬場状態を見る</a>
+  </nav>
 `
   );
 }

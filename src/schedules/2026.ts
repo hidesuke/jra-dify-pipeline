@@ -1,4 +1,4 @@
-import type { YearSchedule } from "./types";
+import type { YearSchedule } from "./types.ts";
 
 // 2026年 JRA 開催日割
 // 出典: https://www.jra.go.jp/keiba/program/2026/pdf/nittei.pdf (変更版 2026.9.6)
