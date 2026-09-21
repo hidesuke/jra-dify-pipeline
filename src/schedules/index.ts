@@ -74,7 +74,10 @@ export function weekdayJp(dateKey: string): string {
   return WEEKDAY_JP[d.getUTCDay()] ?? "";
 }
 
-/** JST の今週（月曜〜日曜）＋週明け月曜（祝日開催用） */
+/**
+ * JST の今週（月曜〜日曜）＋週明け月曜（祝日開催用）＋その翌日火曜（代替開催用）。
+ * 例: 敬老の日月曜が中止→火曜代替でもキック画面に出る。
+ */
 export function dateKeysInJstWeek(todayKey: string): string[] {
   const d = parseDateKey(todayKey);
   if (!d) return [];
@@ -83,7 +86,7 @@ export function dateKeysInJstWeek(todayKey: string): string[] {
   const monday = new Date(d);
   monday.setUTCDate(d.getUTCDate() + mondayOffset);
   const keys: string[] = [];
-  for (let i = 0; i <= 7; i++) {
+  for (let i = 0; i <= 8; i++) {
     const x = new Date(monday);
     x.setUTCDate(monday.getUTCDate() + i);
     keys.push(formatDateKey(x));

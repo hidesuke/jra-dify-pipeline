@@ -4,6 +4,7 @@ import { verifyRaceUrl } from "./verifyRaceUrl";
 import {
   DEFAULT_PREFIX,
   DEFAULT_SEED,
+  remapPendingForCorrectedUrl,
   validateSubmittedRaceUrl,
 } from "./checksum";
 import {
@@ -143,7 +144,12 @@ export async function handleSeedRequest(
     venueCode: validated.parsed.venueCode,
   });
 
-  const results = await enqueue(validated.seed, pending);
+  const pendingForEnqueue = remapPendingForCorrectedUrl(pending, {
+    pendingDate: validated.pendingDate,
+    venueCode: validated.parsed.venueCode,
+    correctedDate: validated.parsed.date,
+  });
+  const results = await enqueue(validated.seed, pendingForEnqueue);
   const remaining: PendingCorrection[] = results
     .filter((r) => r.stillFailed.length > 0)
     .map((r) => ({

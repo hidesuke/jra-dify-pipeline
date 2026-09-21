@@ -2,6 +2,7 @@ import type { YearSchedule } from "./types.ts";
 
 // 2026年 JRA 開催日割
 // 出典: https://www.jra.go.jp/keiba/program/2026/pdf/nittei.pdf (変更版 2026.9.6)
+// 追加: 2026-09-21 中山は台風で中止 → 2026-09-22 に代替（阪神は 09-21 実施）
 export const SCHEDULE_2026: YearSchedule = {
   // === 1月 ===
   "2026-01-04": [
@@ -387,8 +388,10 @@ export const SCHEDULE_2026: YearSchedule = {
     { venueCode: "09", year: 2026, kai: 4, nichi: 6 }  // 4回阪神6日
   ],
   "2026-09-21": [
-    { venueCode: "06", year: 2026, kai: 4, nichi: 7 }, // 4回中山7日
-    { venueCode: "09", year: 2026, kai: 4, nichi: 7 }  // 4回阪神7日
+    { venueCode: "09", year: 2026, kai: 4, nichi: 7 } // 4回阪神7日（中山は中止→09-22へ）
+  ],
+  "2026-09-22": [
+    { venueCode: "06", year: 2026, kai: 4, nichi: 7 } // 4回中山7日（09-21 代替）
   ],
   "2026-09-26": [
     { venueCode: "06", year: 2026, kai: 4, nichi: 8 }, // 4回中山8日

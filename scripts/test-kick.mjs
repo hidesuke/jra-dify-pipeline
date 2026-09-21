@@ -30,30 +30,46 @@ function assert(cond, msg) {
 
 const weekSun = dateKeysInJstWeek("2026-09-20");
 assert(weekSun[0] === "2026-09-14", `week from Sunday starts Monday, got ${weekSun[0]}`);
-assert(weekSun[weekSun.length - 1] === "2026-09-21", `week includes next Monday, got ${weekSun.at(-1)}`);
+assert(weekSun[weekSun.length - 1] === "2026-09-22", `week includes next Tuesday (substitute), got ${weekSun.at(-1)}`);
 assert(weekSun.includes("2026-09-19") && weekSun.includes("2026-09-20"), "weekend dates are in this week");
 
 const weekFri = dateKeysInJstWeek("2026-09-18");
-assert(weekFri[0] === "2026-09-14" && weekFri.at(-1) === "2026-09-21", "Friday uses the same racing week");
+assert(weekFri[0] === "2026-09-14" && weekFri.at(-1) === "2026-09-22", "Friday uses the same racing week");
 
 assert(weekdayJp("2026-09-21") === "月", "2026-09-21 is Monday");
+assert(weekdayJp("2026-09-22") === "火", "2026-09-22 is Tuesday");
 
 const meetings = getKickMeetings("2026-09-20");
 const dates = meetings.map((m) => m.date);
-assert(dates.includes("2026-09-19") && dates.includes("2026-09-20") && dates.includes("2026-09-21"), `this week meetings: ${dates.join(",")}`);
+assert(
+  dates.includes("2026-09-19") &&
+    dates.includes("2026-09-20") &&
+    dates.includes("2026-09-21") &&
+    dates.includes("2026-09-22"),
+  `this week meetings: ${dates.join(",")}`
+);
 assert(!dates.includes("2026-09-26"), "next weekend is not this week");
 
 const sep21 = meetings.find((m) => m.date === "2026-09-21");
-assert(sep21?.venues.some((v) => v.venueCode === "06" && v.venueName === "中山"), "Keiro no hi includes Nakayama");
-assert(sep21?.venues.some((v) => v.venueCode === "09" && v.venueName === "阪神"), "Keiro no hi includes Hanshin");
-assert(sep21?.label.includes("月") && sep21?.label.includes("中山"), `label is JP: ${sep21?.label}`);
+assert(!sep21?.venues.some((v) => v.venueCode === "06"), "Keiro no hi Nakayama moved off 09-21");
+assert(sep21?.venues.some((v) => v.venueCode === "09" && v.venueName === "阪神"), "Keiro no hi still includes Hanshin");
+assert(sep21?.label.includes("月") && sep21?.label.includes("阪神"), `label is JP: ${sep21?.label}`);
+
+const sep22 = meetings.find((m) => m.date === "2026-09-22");
+assert(sep22?.venues.some((v) => v.venueCode === "06" && v.venueName === "中山" && v.nichi === 7), "substitute Tue is Nakayama 4回7日");
+assert(sep22?.label.includes("火") && sep22?.label.includes("中山"), `substitute label: ${sep22?.label}`);
 
 assert(pickDefaultMeetingDate(meetings, "2026-09-20") === "2026-09-20", "today is selected when it has races");
 assert(pickDefaultMeetingDate(getKickMeetings("2026-09-18"), "2026-09-18") === "2026-09-19", "Friday defaults to Saturday");
 
 const monMeetings = getKickMeetings("2026-09-21");
 assert(monMeetings[0].date === "2026-09-21", `Monday week starts at holiday meeting, got ${monMeetings[0].date}`);
+assert(monMeetings.some((m) => m.date === "2026-09-22"), "Monday week includes Tuesday substitute");
 assert(monMeetings.some((m) => m.date === "2026-09-26"), "Monday week still includes next weekend");
+
+const tueMeetings = getKickMeetings("2026-09-22");
+assert(tueMeetings.some((m) => m.date === "2026-09-22"), "Tuesday kick lists substitute Nakayama");
+assert(pickDefaultMeetingDate(tueMeetings, "2026-09-22") === "2026-09-22", "substitute day is default on that day");
 
 const yearEnd = getKickMeetings("2026-12-28");
 assert(
@@ -72,6 +88,7 @@ assert(html.includes("/baba/latest?format=text"), "link to baba");
 assert(html.includes('href="/seed"'), "link to seed form");
 assert(html.includes("中山") && html.includes("阪神"), "this week venues in the form");
 assert(html.includes("9月21日"), "holiday Monday is selectable");
+assert(html.includes("9月22日"), "Tuesday substitute is selectable");
 assert(html.includes('method="post"'), "form posts to current URL");
 
 const page = renderKickForm({ todayKey: "2026-09-20" });
