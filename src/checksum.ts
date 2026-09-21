@@ -5,7 +5,7 @@
 // seed の既定は 0x16。月の項は 9 月サンプルのみのため、不足分は seed に吸収する。
 
 import type { ScheduleItem } from "./schedules";
-import type { PendingCorrection } from "./seedStore";
+import type { PendingCorrection, PendingVenue } from "./seedStore";
 
 export const DEFAULT_SEED = 0x16;
 export const DEFAULT_PREFIX = "pw01dde01";
@@ -194,9 +194,13 @@ export function validateSubmittedRaceUrl(params: {
     };
   }
 
-  const match = pending.find(
+  // 代替開催などで URL 日付が失敗記録と違う場合でも、同じ場なら受け付ける
+  const exact = pending.find(
     (p) => p.date === parsed.date && p.venues.some((v) => v.venueCode === parsed.venueCode)
   );
+  const match =
+    exact ??
+    pending.find((p) => p.venues.some((v) => v.venueCode === parsed.venueCode));
   if (!match) {
     const expected = pending
       .flatMap((p) => p.venues.map((v) => `${p.date} 場:${v.venueCode}`))
@@ -224,4 +228,47 @@ export function validateSubmittedRaceUrl(params: {
     seed: extractSeedFrom1R(parsed),
     pendingDate: match.date,
   };
+}
+
+/**
+ * 代替開催などで正しい 1R の日付が失敗記録と違うとき、
+ * 対象場を URL の日付へ移してから再投入する。
+ */
+export function remapPendingForCorrectedUrl(
+  pending: PendingCorrection[],
+  params: { pendingDate: string; venueCode: string; correctedDate: string }
+): PendingCorrection[] {
+  const { pendingDate, venueCode, correctedDate } = params;
+  if (pendingDate === correctedDate) return pending;
+
+  const next: PendingCorrection[] = [];
+  let moved: PendingVenue | undefined;
+
+  for (const item of pending) {
+    if (item.date !== pendingDate) {
+      next.push({ ...item, venues: [...item.venues] });
+      continue;
+    }
+    const keep = item.venues.filter((v) => v.venueCode !== venueCode);
+    moved = item.venues.find((v) => v.venueCode === venueCode);
+    if (keep.length > 0) {
+      next.push({ ...item, venues: keep });
+    }
+  }
+
+  if (!moved) return pending;
+
+  const existing = next.find((p) => p.date === correctedDate);
+  if (existing) {
+    const byVenue = new Map(existing.venues.map((v) => [v.venueCode, v]));
+    byVenue.set(venueCode, { ...moved, url: moved.url });
+    existing.venues = [...byVenue.values()];
+  } else {
+    next.push({
+      date: correctedDate,
+      createdAt: new Date().toISOString(),
+      venues: [{ ...moved }],
+    });
+  }
+  return next;
 }

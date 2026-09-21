@@ -74,9 +74,11 @@ function validateSubmittedRaceUrl({ rawUrl, pending, expectedPrefix, getSchedule
   if (parsed.error) return { ok: false, error: parsed.error };
   if (parsed.raceNo !== 1) return { ok: false, error: "1R の URL を入力してください" };
   if (parsed.prefix !== expectedPrefix) return { ok: false, error: "prefix" };
-  const match = pending.find(
+  const exact = pending.find(
     (p) => p.date === parsed.date && p.venues.some((v) => v.venueCode === parsed.venueCode)
   );
+  const match =
+    exact ?? pending.find((p) => p.venues.some((v) => v.venueCode === parsed.venueCode));
   if (!match) return { ok: false, error: "失敗記録にない日付・場です" };
   const schedule = getSchedule(parsed.date, parsed.venueCode);
   if (!schedule) return { ok: false, error: "開催表にない" };
@@ -84,6 +86,31 @@ function validateSubmittedRaceUrl({ rawUrl, pending, expectedPrefix, getSchedule
     return { ok: false, error: "開催表の回次・日次と一致しません" };
   }
   return { ok: true, parsed, seed: extractSeedFrom1R(parsed), pendingDate: match.date };
+}
+
+function remapPendingForCorrectedUrl(pending, { pendingDate, venueCode, correctedDate }) {
+  if (pendingDate === correctedDate) return pending;
+  const next = [];
+  let moved;
+  for (const item of pending) {
+    if (item.date !== pendingDate) {
+      next.push({ ...item, venues: [...item.venues] });
+      continue;
+    }
+    const keep = item.venues.filter((v) => v.venueCode !== venueCode);
+    moved = item.venues.find((v) => v.venueCode === venueCode);
+    if (keep.length > 0) next.push({ ...item, venues: keep });
+  }
+  if (!moved) return pending;
+  const existing = next.find((p) => p.date === correctedDate);
+  if (existing) {
+    const byVenue = new Map(existing.venues.map((v) => [v.venueCode, v]));
+    byVenue.set(venueCode, { ...moved });
+    existing.venues = [...byVenue.values()];
+  } else {
+    next.push({ date: correctedDate, createdAt: new Date().toISOString(), venues: [{ ...moved }] });
+  }
+  return next;
 }
 
 function configuredAccessAuds(env) {
@@ -174,6 +201,12 @@ function getSchedule(date, venueCode) {
   if (date === "2026-09-19" && venueCode === "06") {
     return { venueCode: "06", year: 2026, kai: 4, nichi: 5 };
   }
+  if (date === "2026-09-22" && venueCode === "06") {
+    return { venueCode: "06", year: 2026, kai: 4, nichi: 7 };
+  }
+  if (date === "2026-09-21" && venueCode === "09") {
+    return { venueCode: "09", year: 2026, kai: 4, nichi: 7 };
+  }
   return undefined;
 }
 
@@ -254,6 +287,37 @@ const emptyPending = validateSubmittedRaceUrl({
   getSchedule,
 });
 assert(!emptyPending.ok && emptyPending.error.includes("補正待ち"), "reject when no pending session");
+
+{
+  // 中山 09-21 中止 → 09-22 代替: 失敗記録は旧日付のまま、正しい 1R は新日付
+  const NAKAYAMA_SUB_1R =
+    "https://www.jra.go.jp/JRADB/accessD.html?CNAME=pw01dde0106202604070120260922/71";
+  const postponedPending = [
+    {
+      date: "2026-09-21",
+      venues: [{ venueCode: "06", url: "https://jra.jp/generated-for-0921" }],
+    },
+  ];
+  const postponed = validateSubmittedRaceUrl({
+    rawUrl: NAKAYAMA_SUB_1R,
+    pending: postponedPending,
+    expectedPrefix: DEFAULT_PREFIX,
+    getSchedule,
+  });
+  assert(
+    postponed.ok && postponed.pendingDate === "2026-09-21" && postponed.parsed.date === "2026-09-22",
+    `accept postponed 1R date mismatch (pendingDate=${postponed.pendingDate}, urlDate=${postponed.parsed?.date})`
+  );
+  assert(postponed.seed === 0x38, `substitute 1R seed is 0x38 (got 0x${postponed.seed?.toString(16)})`);
+
+  const remapped = remapPendingForCorrectedUrl(postponedPending, {
+    pendingDate: postponed.pendingDate,
+    venueCode: "06",
+    correctedDate: postponed.parsed.date,
+  });
+  assert(remapped.length === 1 && remapped[0].date === "2026-09-22", "remap pending to substitute date");
+  assert(remapped[0].venues.length === 1 && remapped[0].venues[0].venueCode === "06", "remapped venue kept");
+}
 
 {
   const kv = new MemorySeedKv();
