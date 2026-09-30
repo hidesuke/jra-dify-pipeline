@@ -73,8 +73,18 @@ assert(pickDefaultMeetingDate(tueMeetings, "2026-09-22") === "2026-09-22", "subs
 
 const yearEnd = getKickMeetings("2026-12-28");
 assert(
-  yearEnd.some((m) => m.date === "2026-12-26") && yearEnd.some((m) => m.date === "2026-12-27"),
-  `empty week falls back to nearby meetings: ${yearEnd.map((m) => m.date).join(",")}`
+  yearEnd.some((m) => m.date === "2027-01-04") && yearEnd.some((m) => m.date === "2027-01-05"),
+  `year-end week includes the new year meetings: ${yearEnd.map((m) => m.date).join(",")}`
+);
+assert(
+  !yearEnd.some((m) => m.date === "2026-12-26"),
+  "previous weekend is outside the extended week"
+);
+
+const beforeSeason = getKickMeetings("2025-12-22");
+assert(
+  beforeSeason.some((m) => m.date === "2026-01-04") && beforeSeason.some((m) => m.date === "2026-01-05"),
+  `empty week falls back to nearby meetings: ${beforeSeason.map((m) => m.date).join(",")}`
 );
 
 const html = kickFormHtml({ todayKey: "2026-09-20" });
