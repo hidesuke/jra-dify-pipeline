@@ -418,7 +418,7 @@ npx wrangler tail --status error
 
 1. [Workers & Pages](https://dash.cloudflare.com/) → `jra-dify-pipeline`
 2. **Logs** → **Live** でリアルタイム
-3. **Observability** で過去ログの検索（アカウントによって、`wrangler.jsonc` に `"observability": { "enabled": true }` を足して再デプロイが必要なことがあります）
+3. **Observability** で過去ログの検索（`wrangler.jsonc` で有効化済み。反映後にダッシュボードから検索できる）
 
 Cron の実行履歴は Worker の **Settings → Triggers** 付近の Cron Events（直近 100 件程度）でも見られます。
 
