@@ -19,6 +19,7 @@ export function htmlPage(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex, nofollow, noarchive">
   <title>${escapeHtml(title)}</title>
   <style>
     :root {
@@ -126,6 +127,10 @@ ${body}
 `;
   return new Response(html, {
     status,
-    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Robots-Tag": "noindex, nofollow, noarchive",
+    },
   });
 }

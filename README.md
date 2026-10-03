@@ -30,7 +30,10 @@ GET /seed        → 失敗した場の正しい 1R URL を入れて seed を更
 | `GET /seed` または `POST /seed` | 1R がパラメータエラーだった場の正しい URL を入力する。認証は `/run` と同じ（Cloudflare Access または `PREDICT_SECRET`）。成功すると seed を KV に保存し、失敗していた場を Queue へ再投入する |
 | `GET /baba/latest` | 各場の**最新計測だけ**を JSON で返す。認証なし。Dify の HTTP リクエストツールなど AI から読む用。履歴やパース生データは含まない |
 | `GET /baba` | 馬場データの確認用ダンプ（全計測）。認証なし。キュー投入なし |
+| `GET /robots.txt` | クローラ向けに `Disallow: /`（主要 AI ボット UA も明示）。索引・学習クローラ向けの最低限対策 |
 | `queue` | Queue consumer。1 件ずつ Dify へ streaming POST。`workflow_finished`(succeeded) で成功。タイムアウト／切断は ack（リトライなし）。他エラーは最大 3 回リトライし、尽きるとメール通知 |
+
+公開応答には `X-Robots-Tag: noindex, nofollow, noarchive` を付けます。HTML には同内容の `<meta name="robots">` もあります。`/baba/latest` など **意図した API 呼び出しは塞ぎません**（robots を無視しない正規クローラ向け）。
 
 `GET /`・`/run`・`/verify` のクエリは同じです。`/kick` のフォームも同じ項目を POST します。`date=YYYY-MM-DD`（省略時は JST の今日）、`venue=06`（場コード 2 桁）、`race=1`（1〜12）。
 
@@ -552,6 +555,7 @@ npm run dev
 
 ```bash
 curl "http://localhost:8787/?date=2026-09-12&venue=06&race=1"
+curl "http://localhost:8787/robots.txt"
 curl "http://localhost:8787/baba/latest"
 curl "http://localhost:8787/baba/latest?venue=06&format=text"
 curl -H "Authorization: Bearer local-dev-secret" \

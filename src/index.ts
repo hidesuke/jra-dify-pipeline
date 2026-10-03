@@ -34,6 +34,7 @@ import {
   runDifyWorkflowStreaming,
   shouldRetryOutcome,
 } from "./dify";
+import { robotsTxtResponse, withNoindex } from "./crawlGuard";
 
 export type { ScheduleItem };
 
@@ -232,66 +233,77 @@ export default {
   // 3. GET / は馬柱 URL の一覧のみ。予想は GET|POST /run（認証必須）。
   //    ブラウザの /kick とクエリ無し GET /run はキック用フォーム。
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(req.url);
-    const path = url.pathname.replace(/\/+$/, "") || "/";
-
-    if (path === "/kick") {
-      const denied = await authorizePredict(req, env, ctx);
-      if (denied) return denied;
-      if (req.method === "GET" || req.method === "HEAD") {
-        return renderKickForm({
-          todayKey: jstDateKey(),
-          selectedDate: url.searchParams.get("date") || undefined,
-          selectedVenue: url.searchParams.get("venue") || undefined,
-          selectedRace: url.searchParams.get("race") || undefined,
-        });
-      }
-      if (req.method === "POST") {
-        return enqueueRaces(req, env);
-      }
-      return new Response("Method not allowed\n", { status: 405, headers: { Allow: "GET, POST" } });
-    }
-
-    if (path === "/run") {
-      const denied = await authorizePredict(req, env, ctx);
-      if (denied) return denied;
-      if (wantsKickForm(req)) {
-        return renderKickForm({ todayKey: jstDateKey() });
-      }
-      return enqueueRaces(req, env);
-    }
-
-    if (path === "/verify") {
-      const denied = await authorizePredict(req, env, ctx);
-      if (denied) return denied;
-      return verifyRaces(req, env);
-    }
-
-    if (path === "/seed") {
-      const denied = await authorizePredict(req, env, ctx);
-      if (denied) return denied;
-      return handleSeedRequest(req, env, (seed, pending) => enqueueAfterSeedUpdate(env, seed, pending));
-    }
-
-    if (path === "/baba/latest") {
-      if (req.method === "OPTIONS") return corsPreflight();
-      if (req.method !== "GET" && req.method !== "HEAD") {
-        return new Response("Method not allowed\n", { status: 405, headers: publicHeaders("text/plain; charset=utf-8") });
-      }
-      return babaLatest(req);
-    }
-
-    if (path === "/baba") {
-      return babaDebug(req);
-    }
-
-    if (path !== "/") {
-      return new Response("Not found\n", { status: 404 });
-    }
-
-    return listRaceUrls(req, env);
+    return withNoindex(await handleFetch(req, env, ctx));
   }
 };
+
+async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const url = new URL(req.url);
+  const path = url.pathname.replace(/\/+$/, "") || "/";
+
+  if (path === "/robots.txt") {
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      return new Response("Method not allowed\n", { status: 405, headers: { Allow: "GET, HEAD" } });
+    }
+    return robotsTxtResponse();
+  }
+
+  if (path === "/kick") {
+    const denied = await authorizePredict(req, env, ctx);
+    if (denied) return denied;
+    if (req.method === "GET" || req.method === "HEAD") {
+      return renderKickForm({
+        todayKey: jstDateKey(),
+        selectedDate: url.searchParams.get("date") || undefined,
+        selectedVenue: url.searchParams.get("venue") || undefined,
+        selectedRace: url.searchParams.get("race") || undefined,
+      });
+    }
+    if (req.method === "POST") {
+      return enqueueRaces(req, env);
+    }
+    return new Response("Method not allowed\n", { status: 405, headers: { Allow: "GET, POST" } });
+  }
+
+  if (path === "/run") {
+    const denied = await authorizePredict(req, env, ctx);
+    if (denied) return denied;
+    if (wantsKickForm(req)) {
+      return renderKickForm({ todayKey: jstDateKey() });
+    }
+    return enqueueRaces(req, env);
+  }
+
+  if (path === "/verify") {
+    const denied = await authorizePredict(req, env, ctx);
+    if (denied) return denied;
+    return verifyRaces(req, env);
+  }
+
+  if (path === "/seed") {
+    const denied = await authorizePredict(req, env, ctx);
+    if (denied) return denied;
+    return handleSeedRequest(req, env, (seed, pending) => enqueueAfterSeedUpdate(env, seed, pending));
+  }
+
+  if (path === "/baba/latest") {
+    if (req.method === "OPTIONS") return corsPreflight();
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      return new Response("Method not allowed\n", { status: 405, headers: publicHeaders("text/plain; charset=utf-8") });
+    }
+    return babaLatest(req);
+  }
+
+  if (path === "/baba") {
+    return babaDebug(req);
+  }
+
+  if (path !== "/") {
+    return new Response("Not found\n", { status: 404 });
+  }
+
+  return listRaceUrls(req, env);
+}
 
 /**
  * 各場 1R を検証し、エラーページの場を除外する。
@@ -416,6 +428,7 @@ function publicHeaders(contentType: string, extra?: Record<string, string>): Hea
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
+    "X-Robots-Tag": "noindex, nofollow, noarchive",
     ...extra,
   };
 }
