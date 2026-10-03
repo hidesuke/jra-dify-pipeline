@@ -3,8 +3,12 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-09-01",
   // Workers Logs（ダッシュボード Observability）。Free でも利用可
+  // issues = 問題検出（例外・5xx・console.error をグルーピング。ベータ中は無料）
   "observability": {
-    "enabled": true
+    "enabled": true,
+    "issues": {
+      "enabled": true
+    }
   },
   "vars": {
     // 検証済み Destination（ダッシュボードと同期。再デプロイで消えないように wrangler にも書く）
