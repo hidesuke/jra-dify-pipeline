@@ -2,6 +2,10 @@
   "name": "jra-dify-pipeline",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-01",
+  // Workers Logs（ダッシュボード Observability）。Free でも利用可
+  "observability": {
+    "enabled": true
+  },
   "vars": {
     // 検証済み Destination（ダッシュボードと同期。再デプロイで消えないように wrangler にも書く）
     "NOTIFY_EMAIL": "hidesuke@gmail.com",
