@@ -8,7 +8,7 @@ import {
   buildLatestBaba,
   resolveVenueKey,
 } from "./baba";
-import { notifyRaceUrlFailures } from "./notify";
+import { notifyDifyFailure, notifyRaceUrlFailures } from "./notify";
 import { verifyVenue1RUrls, type RaceUrlCheck } from "./verifyRaceUrl";
 import {
   DEFAULT_PREFIX,
@@ -28,6 +28,12 @@ import {
   renderKickResult,
   wantsKickForm,
 } from "./kickForm";
+import {
+  DIFY_QUEUE_MAX_RETRIES,
+  isFinalQueueAttempt,
+  runDifyWorkflowStreaming,
+  shouldRetryOutcome,
+} from "./dify";
 
 export type { ScheduleItem };
 
@@ -173,42 +179,53 @@ export default {
     console.log(`Successfully enqueued ${messages.length} races for ${targetDateKey} (seed=0x${seed.toString(16).toUpperCase().padStart(2, "0")})`);
   },
 
-  // 2. Queue Consumer: Dify API を順次キック
+  // 2. Queue Consumer: Dify API を streaming でキック
+  //    成功 = workflow_finished(succeeded)。タイムアウト／切断は ack。他エラーは最大 3 回リトライ後にメール。
   async queue(batch: MessageBatch<RaceMessage>, env: Env): Promise<void> {
     for (const msg of batch.messages) {
       const { targetDate, venueCode, raceNo, raceUrl, baba } = msg.body;
       // 馬場情報がある場合は remarks（備考欄）に追記する。
       const remarks = `${targetDate} 場:${venueCode} ${raceNo}R${baba ? ` ｜ ${baba.summary}` : ""}`;
-      console.log(`Executing Dify API: ${remarks} ${raceUrl}`);
+      const query = `${targetDate} 場:${venueCode} ${raceNo}R`;
+      console.log(`Executing Dify API (streaming, attempt=${msg.attempts}): ${remarks} ${raceUrl}`);
 
-      try {
-        const res = await fetch(env.DIFY_API_URL, {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${env.DIFY_API_KEY}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            inputs: {
-              url: raceUrl,
-              remarks
-            },
-            query: `${targetDate} 場:${venueCode} ${raceNo}R`,
-            response_mode: "blocking",
-            user: "cloudflare-queue-worker"
-          })
-        });
+      const outcome = await runDifyWorkflowStreaming({
+        apiUrl: env.DIFY_API_URL,
+        apiKey: env.DIFY_API_KEY,
+        raceUrl,
+        remarks,
+        query,
+      });
 
-        if (!res.ok) {
-          const errText = await res.text();
-          throw new Error(`Dify API error (${res.status}): ${errText}`);
-        }
-
+      if (outcome.kind === "success") {
+        console.log(
+          `Dify succeeded: ${remarks}${outcome.workflowRunId ? ` run=${outcome.workflowRunId}` : ""}`
+        );
         msg.ack();
-      } catch (error) {
-        console.error(`Failed to process ${targetDate} ${venueCode} ${raceNo}R:`, error);
-        msg.retry();
+        continue;
       }
+
+      if (!shouldRetryOutcome(outcome)) {
+        // timeout / disconnect → 正常終了扱い（再実行しない）
+        console.warn(`Dify ${outcome.kind} (ack, no retry): ${remarks} ${outcome.detail}`);
+        msg.ack();
+        continue;
+      }
+
+      console.error(`Dify retryable failure: ${remarks} ${outcome.detail}`);
+      if (isFinalQueueAttempt(msg.attempts, DIFY_QUEUE_MAX_RETRIES)) {
+        await notifyDifyFailure(env, {
+          targetDate,
+          venueCode,
+          raceNo,
+          raceUrl,
+          attempts: msg.attempts,
+          detail: outcome.detail,
+        });
+        msg.ack();
+        continue;
+      }
+      msg.retry();
     }
   },
 
