@@ -122,3 +122,47 @@ export async function notifyRaceUrlFailures(
   console.log(`Notifying race URL failures for ${date}: ${failures.length} venue(s)`);
   return sendNotifyEmail(env, mail);
 }
+
+export function formatDifyFailureEmail(params: {
+  targetDate: string;
+  venueCode: string;
+  raceNo: number;
+  raceUrl: string;
+  attempts: number;
+  detail: string;
+}): { subject: string; text: string } {
+  const { targetDate, venueCode, raceNo, raceUrl, attempts, detail } = params;
+  const subject = `[jra-dify-pipeline] Dify失敗 ${targetDate} 場:${venueCode} ${raceNo}R`;
+  const text = [
+    `Dify ワークフローがリトライ上限後も失敗しました。`,
+    ``,
+    `対象日: ${targetDate}`,
+    `場: ${venueCode}`,
+    `レース: ${raceNo}R`,
+    `試行回数: ${attempts}`,
+    `URL: ${raceUrl}`,
+    `詳細: ${detail}`,
+    ``,
+    `タイムアウト／切断は成功扱いでリトライしていません。この通知はそれ以外のエラーが解消しなかった場合のみ送られます。`,
+  ].join("\n");
+  return { subject, text };
+}
+
+/** Queue でリトライ尽きた Dify 失敗をメールする */
+export async function notifyDifyFailure(
+  env: NotifyEnv,
+  params: {
+    targetDate: string;
+    venueCode: string;
+    raceNo: number;
+    raceUrl: string;
+    attempts: number;
+    detail: string;
+  }
+): Promise<boolean> {
+  const mail = formatDifyFailureEmail(params);
+  console.log(
+    `Notifying Dify failure for ${params.targetDate} 場:${params.venueCode} ${params.raceNo}R after ${params.attempts} attempt(s)`
+  );
+  return sendNotifyEmail(env, mail);
+}

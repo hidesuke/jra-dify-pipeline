@@ -8,7 +8,7 @@ import {
   buildLatestBaba,
   resolveVenueKey,
 } from "./baba";
-import { notifyRaceUrlFailures } from "./notify";
+import { notifyDifyFailure, notifyRaceUrlFailures } from "./notify";
 import { verifyVenue1RUrls, type RaceUrlCheck } from "./verifyRaceUrl";
 import {
   DEFAULT_PREFIX,
@@ -28,6 +28,13 @@ import {
   renderKickResult,
   wantsKickForm,
 } from "./kickForm";
+import {
+  DIFY_QUEUE_MAX_RETRIES,
+  isFinalQueueAttempt,
+  runDifyWorkflowStreaming,
+  shouldRetryOutcome,
+} from "./dify";
+import { robotsTxtResponse, withNoindex } from "./crawlGuard";
 
 export type { ScheduleItem };
 
@@ -173,108 +180,130 @@ export default {
     console.log(`Successfully enqueued ${messages.length} races for ${targetDateKey} (seed=0x${seed.toString(16).toUpperCase().padStart(2, "0")})`);
   },
 
-  // 2. Queue Consumer: Dify API を順次キック
+  // 2. Queue Consumer: Dify API を streaming でキック
+  //    成功 = workflow_finished(succeeded)。タイムアウト／切断は ack。他エラーは最大 3 回リトライ後にメール。
   async queue(batch: MessageBatch<RaceMessage>, env: Env): Promise<void> {
     for (const msg of batch.messages) {
       const { targetDate, venueCode, raceNo, raceUrl, baba } = msg.body;
       // 馬場情報がある場合は remarks（備考欄）に追記する。
       const remarks = `${targetDate} 場:${venueCode} ${raceNo}R${baba ? ` ｜ ${baba.summary}` : ""}`;
-      console.log(`Executing Dify API: ${remarks} ${raceUrl}`);
+      const query = `${targetDate} 場:${venueCode} ${raceNo}R`;
+      console.log(`Executing Dify API (streaming, attempt=${msg.attempts}): ${remarks} ${raceUrl}`);
 
-      try {
-        const res = await fetch(env.DIFY_API_URL, {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${env.DIFY_API_KEY}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            inputs: {
-              url: raceUrl,
-              remarks
-            },
-            query: `${targetDate} 場:${venueCode} ${raceNo}R`,
-            response_mode: "blocking",
-            user: "cloudflare-queue-worker"
-          })
-        });
+      const outcome = await runDifyWorkflowStreaming({
+        apiUrl: env.DIFY_API_URL,
+        apiKey: env.DIFY_API_KEY,
+        raceUrl,
+        remarks,
+        query,
+      });
 
-        if (!res.ok) {
-          const errText = await res.text();
-          throw new Error(`Dify API error (${res.status}): ${errText}`);
-        }
-
+      if (outcome.kind === "success") {
+        console.log(
+          `Dify succeeded: ${remarks}${outcome.workflowRunId ? ` run=${outcome.workflowRunId}` : ""}`
+        );
         msg.ack();
-      } catch (error) {
-        console.error(`Failed to process ${targetDate} ${venueCode} ${raceNo}R:`, error);
-        msg.retry();
+        continue;
       }
+
+      if (!shouldRetryOutcome(outcome)) {
+        // timeout / disconnect → 正常終了扱い（再実行しない）
+        console.warn(`Dify ${outcome.kind} (ack, no retry): ${remarks} ${outcome.detail}`);
+        msg.ack();
+        continue;
+      }
+
+      console.error(`Dify retryable failure: ${remarks} ${outcome.detail}`);
+      if (isFinalQueueAttempt(msg.attempts, DIFY_QUEUE_MAX_RETRIES)) {
+        await notifyDifyFailure(env, {
+          targetDate,
+          venueCode,
+          raceNo,
+          raceUrl,
+          attempts: msg.attempts,
+          detail: outcome.detail,
+        });
+        msg.ack();
+        continue;
+      }
+      msg.retry();
     }
   },
 
   // 3. GET / は馬柱 URL の一覧のみ。予想は GET|POST /run（認証必須）。
   //    ブラウザの /kick とクエリ無し GET /run はキック用フォーム。
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(req.url);
-    const path = url.pathname.replace(/\/+$/, "") || "/";
-
-    if (path === "/kick") {
-      const denied = await authorizePredict(req, env, ctx);
-      if (denied) return denied;
-      if (req.method === "GET" || req.method === "HEAD") {
-        return renderKickForm({
-          todayKey: jstDateKey(),
-          selectedDate: url.searchParams.get("date") || undefined,
-          selectedVenue: url.searchParams.get("venue") || undefined,
-          selectedRace: url.searchParams.get("race") || undefined,
-        });
-      }
-      if (req.method === "POST") {
-        return enqueueRaces(req, env);
-      }
-      return new Response("Method not allowed\n", { status: 405, headers: { Allow: "GET, POST" } });
-    }
-
-    if (path === "/run") {
-      const denied = await authorizePredict(req, env, ctx);
-      if (denied) return denied;
-      if (wantsKickForm(req)) {
-        return renderKickForm({ todayKey: jstDateKey() });
-      }
-      return enqueueRaces(req, env);
-    }
-
-    if (path === "/verify") {
-      const denied = await authorizePredict(req, env, ctx);
-      if (denied) return denied;
-      return verifyRaces(req, env);
-    }
-
-    if (path === "/seed") {
-      const denied = await authorizePredict(req, env, ctx);
-      if (denied) return denied;
-      return handleSeedRequest(req, env, (seed, pending) => enqueueAfterSeedUpdate(env, seed, pending));
-    }
-
-    if (path === "/baba/latest") {
-      if (req.method === "OPTIONS") return corsPreflight();
-      if (req.method !== "GET" && req.method !== "HEAD") {
-        return new Response("Method not allowed\n", { status: 405, headers: publicHeaders("text/plain; charset=utf-8") });
-      }
-      return babaLatest(req);
-    }
-
-    if (path === "/baba") {
-      return babaDebug(req);
-    }
-
-    if (path !== "/") {
-      return new Response("Not found\n", { status: 404 });
-    }
-
-    return listRaceUrls(req, env);
+    return withNoindex(await handleFetch(req, env, ctx));
   }
 };
+
+async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const url = new URL(req.url);
+  const path = url.pathname.replace(/\/+$/, "") || "/";
+
+  if (path === "/robots.txt") {
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      return new Response("Method not allowed\n", { status: 405, headers: { Allow: "GET, HEAD" } });
+    }
+    return robotsTxtResponse();
+  }
+
+  if (path === "/kick") {
+    const denied = await authorizePredict(req, env, ctx);
+    if (denied) return denied;
+    if (req.method === "GET" || req.method === "HEAD") {
+      return renderKickForm({
+        todayKey: jstDateKey(),
+        selectedDate: url.searchParams.get("date") || undefined,
+        selectedVenue: url.searchParams.get("venue") || undefined,
+        selectedRace: url.searchParams.get("race") || undefined,
+      });
+    }
+    if (req.method === "POST") {
+      return enqueueRaces(req, env);
+    }
+    return new Response("Method not allowed\n", { status: 405, headers: { Allow: "GET, POST" } });
+  }
+
+  if (path === "/run") {
+    const denied = await authorizePredict(req, env, ctx);
+    if (denied) return denied;
+    if (wantsKickForm(req)) {
+      return renderKickForm({ todayKey: jstDateKey() });
+    }
+    return enqueueRaces(req, env);
+  }
+
+  if (path === "/verify") {
+    const denied = await authorizePredict(req, env, ctx);
+    if (denied) return denied;
+    return verifyRaces(req, env);
+  }
+
+  if (path === "/seed") {
+    const denied = await authorizePredict(req, env, ctx);
+    if (denied) return denied;
+    return handleSeedRequest(req, env, (seed, pending) => enqueueAfterSeedUpdate(env, seed, pending));
+  }
+
+  if (path === "/baba/latest") {
+    if (req.method === "OPTIONS") return corsPreflight();
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      return new Response("Method not allowed\n", { status: 405, headers: publicHeaders("text/plain; charset=utf-8") });
+    }
+    return babaLatest(req);
+  }
+
+  if (path === "/baba") {
+    return babaDebug(req);
+  }
+
+  if (path !== "/") {
+    return new Response("Not found\n", { status: 404 });
+  }
+
+  return listRaceUrls(req, env);
+}
 
 /**
  * 各場 1R を検証し、エラーページの場を除外する。
@@ -399,6 +428,7 @@ function publicHeaders(contentType: string, extra?: Record<string, string>): Hea
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
+    "X-Robots-Tag": "noindex, nofollow, noarchive",
     ...extra,
   };
 }

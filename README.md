@@ -30,7 +30,10 @@ GET /seed        → 失敗した場の正しい 1R URL を入れて seed を更
 | `GET /seed` または `POST /seed` | 1R がパラメータエラーだった場の正しい URL を入力する。認証は `/run` と同じ（Cloudflare Access または `PREDICT_SECRET`）。成功すると seed を KV に保存し、失敗していた場を Queue へ再投入する |
 | `GET /baba/latest` | 各場の**最新計測だけ**を JSON で返す。認証なし。Dify の HTTP リクエストツールなど AI から読む用。履歴やパース生データは含まない |
 | `GET /baba` | 馬場データの確認用ダンプ（全計測）。認証なし。キュー投入なし |
-| `queue` | Queue consumer。1 件ずつ Dify へ blocking POST。失敗時は最大 3 回リトライ |
+| `GET /robots.txt` | クローラ向けに `Disallow: /`（主要 AI ボット UA も明示）。索引・学習クローラ向けの最低限対策 |
+| `queue` | Queue consumer。1 件ずつ Dify へ streaming POST。`workflow_finished`(succeeded) で成功。タイムアウト／切断は ack（リトライなし）。他エラーは最大 3 回リトライし、尽きるとメール通知 |
+
+公開応答には `X-Robots-Tag: noindex, nofollow, noarchive` を付けます。HTML には同内容の `<meta name="robots">` もあります。`/baba/latest` など **意図した API 呼び出しは塞ぎません**（robots を無視しない正規クローラ向け）。
 
 `GET /`・`/run`・`/verify` のクエリは同じです。`/kick` のフォームも同じ項目を POST します。`date=YYYY-MM-DD`（省略時は JST の今日）、`venue=06`（場コード 2 桁）、`race=1`（1〜12）。
 
@@ -123,7 +126,7 @@ Queue consumer が `DIFY_API_URL` へ `POST` する JSON:
     "remarks": "2026-09-12 場:06 1R"
   },
   "query": "2026-09-12 場:06 1R",
-  "response_mode": "blocking",
+  "response_mode": "streaming",
   "user": "cloudflare-queue-worker"
 }
 ```
@@ -133,10 +136,17 @@ Queue consumer が `DIFY_API_URL` へ `POST` する JSON:
 | `inputs.url` | 文字列 | 馬柱（出馬表）の JRA URL |
 | `inputs.remarks` | 文字列 | 任意の備考。日付・場・R をテキストで付与 |
 | `query` | 文字列 | Workflow API の必須項目ではない。チャットアプリ向けに同じ文を付けている |
-| `response_mode` | 文字列 | `blocking`。完了まで HTTP を待つ（Dify 側は約 100 秒で切れることがある） |
+| `response_mode` | 文字列 | `streaming`（SSE）。`workflow_finished` まで読む |
 | `user` | 文字列 | Dify API 必須の実行ユーザー識別子 |
 
-1 開催日 × 1 場につき 12 通（1R〜12R）送ります。Worker は Dify の応答本文を保存せず、HTTP ステータスが 2xx なら ack、それ以外はリトライします。
+1 開催日 × 1 場につき 12 通（1R〜12R）送ります。Queue consumer の判定:
+
+| 結果 | 動作 |
+| --- | --- |
+| `workflow_finished` かつ `status=succeeded` | ack（成功） |
+| SSE `error` で message に timeout / timed out | ack（再実行しない。Dify 側では完了していることが多い） |
+| HTTP 408 / 504 / 524、またはストリーム切断 | ack（再実行しない） |
+| 上記以外のエラー（LLM／実行失敗、429 など） | 最大 3 回リトライ。尽きるとメール通知して ack |
 
 チェックサムは 2026-09-06 / 09-12 / 09-13 の実 URL で検証済みです。月の項は 9 月サンプルのみなので、不足分は KV の seed に吸収します。1R がパラメータエラーになったら `/seed` で正しい 1R URL を入れ、seed を更新してください。
 
@@ -397,8 +407,11 @@ npm run deploy
 | メール通知 | `console.log` | `Notifying race URL failures for YYYY-MM-DD: N venue(s)` |
 | キュー投入成功（Cron） | `console.log` | `Successfully enqueued N races for YYYY-MM-DD (seed=0x16)` |
 | シード更新後の再投入 | `console.log` | `Seed 0x.. re-enqueue YYYY-MM-DD: N races, stillFailed=0` |
-| Dify 呼び出し直前 | `console.log` | `Executing Dify API: YYYY-MM-DD 場:06 1R <url>` |
-| Dify 失敗 | `console.error` | `Failed to process ...` とエラー |
+| Dify 呼び出し直前 | `console.log` | `Executing Dify API (streaming, attempt=N): YYYY-MM-DD 場:06 1R <url>` |
+| Dify 成功 | `console.log` | `Dify succeeded: ...` |
+| Dify タイムアウト／切断 | `console.warn` | `Dify timeout\|disconnect (ack, no retry): ...` |
+| Dify リトライ対象失敗 | `console.error` | `Dify retryable failure: ...` |
+| Dify 最終失敗メール | `console.log` | `Notifying Dify failure for ...` |
 
 `GET /` は馬柱 URL を 1 行ずつ返すプレーンテキストです。日付や場コードは本文に含みません。Queue にも載せません。
 
@@ -542,6 +555,7 @@ npm run dev
 
 ```bash
 curl "http://localhost:8787/?date=2026-09-12&venue=06&race=1"
+curl "http://localhost:8787/robots.txt"
 curl "http://localhost:8787/baba/latest"
 curl "http://localhost:8787/baba/latest?venue=06&format=text"
 curl -H "Authorization: Bearer local-dev-secret" \
@@ -571,7 +585,7 @@ curl "http://localhost:8787/cdn-cgi/local/scheduled"
 - `max_retries`: 3
 - `max_concurrency`: 2（Dify 側の負荷に合わせて調整）
 
-Dead Letter Queue は未設定です。リトライ上限を超えたメッセージは破棄されます。
+Dead Letter Queue は未設定です。リトライ対象のエラーが上限を超えた場合はメール通知のうえ ack します（タイムアウト／切断は最初から ack）。
 
 投入済みをまとめて捨てる場合は、先に配信を止めてから purge します。1 件ずつの取り消しはできません。処理中のメッセージは残り得ます。
 
