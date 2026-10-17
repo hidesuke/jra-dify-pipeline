@@ -1,21 +1,22 @@
-import { getSchedulesForDate } from "./schedules";
-import type { RaceUrlCheck } from "./verifyRaceUrl";
-import { verifyRaceUrl } from "./verifyRaceUrl";
+import { getSchedulesForDate, venueName } from "./schedules/index.ts";
+import type { RaceUrlCheck } from "./verifyRaceUrl.ts";
+import { verifyRaceUrl } from "./verifyRaceUrl.ts";
 import {
   DEFAULT_PREFIX,
-  DEFAULT_SEED,
   remapPendingForCorrectedUrl,
   validateSubmittedRaceUrl,
-} from "./checksum";
+} from "./checksum.ts";
 import {
+  formatSeedHex,
   getPendingCorrections,
-  getStoredSeedRecord,
-  saveSeed,
+  loadSeedOverview,
+  saveVenueSeed,
   setPendingCorrections,
   type PendingCorrection,
   type SeedKv,
-} from "./seedStore";
-import { escapeHtml, htmlPage } from "./html";
+  type SeedOverview,
+} from "./seedStore.ts";
+import { escapeHtml, htmlPage } from "./html.ts";
 
 export interface SeedFormEnv {
   CHECKSUM_SEED?: SeedKv;
@@ -31,14 +32,37 @@ export interface SeedEnqueueResult {
   checks: RaceUrlCheck[];
 }
 
+export interface UpdatedVenueSeed {
+  venueCode: string;
+  year: number;
+  kai: number;
+  seed: number;
+}
+
 export type EnqueueAfterSeed = (
-  seed: number,
+  updated: UpdatedVenueSeed,
   pending: PendingCorrection[]
 ) => Promise<SeedEnqueueResult[]>;
 
+function seedStatusBlock(status: SeedOverview): string {
+  const globalHex = formatSeedHex(status.globalSeed);
+  const globalNote = status.globalStored ? "KV の共通シード" : "未設定のため初期値";
+  const items =
+    status.venues.length === 0
+      ? `<li>場ごとのシードはまだありません。</li>`
+      : status.venues
+          .map((v) => {
+            const when = v.date ? `（${escapeHtml(v.date)} の 1R から）` : "";
+            return `<li>${escapeHtml(venueName(v.venueCode))}（${escapeHtml(v.venueCode)}） ${v.year}年${v.kai}回: <code>0x${formatSeedHex(v.seed)}</code>${when}</li>`;
+          })
+          .join("");
+  return `<p class="muted">共通シード（場ごとの値がないときのフォールバック）: <code>0x${escapeHtml(globalHex)}</code>（${escapeHtml(globalNote)}）</p>
+  <ul>${items}</ul>`;
+}
+
 function pendingListHtml(pending: PendingCorrection[]): string {
   if (pending.length === 0) {
-    return `<p class="muted">補正待ちの 1R 失敗はありません。シードは次に 1R がエラーページになるまで保持されます。</p>`;
+    return `<p class="muted">補正待ちの 1R 失敗はありません。場ごとのシードは、次にその場の 1R がエラーページになるまで保持されます。</p>`;
   }
   const items = pending
     .map((p) => {
@@ -53,28 +77,28 @@ function pendingListHtml(pending: PendingCorrection[]): string {
       return `<li><strong>${escapeHtml(p.date)}</strong><ul>${venues}</ul></li>`;
     })
     .join("");
-  return `<p>次の失敗について、いずれか 1 場の正しい 1R URL を貼ってください。シードは全場共通です。</p><ul>${items}</ul>`;
+  return `<p>失敗した場の正しい 1R URL を貼ってください。更新されるのはその URL の場・年・回だけです。別の場が失敗しているときは、その場の 1R URL でもう一度補正してください。</p><ul>${items}</ul>`;
 }
 
 function formHtml(params: {
   pending: PendingCorrection[];
-  seedHex: string;
+  status: SeedOverview;
   error?: string;
   submittedUrl?: string;
 }): string {
-  const { pending, seedHex, error, submittedUrl } = params;
+  const { pending, status, error, submittedUrl } = params;
   const errorBlock = error ? `<p class="error">${escapeHtml(error)}</p>` : "";
   const disabled = pending.length === 0 ? " disabled" : "";
   const value = submittedUrl ? ` value="${escapeHtml(submittedUrl)}"` : "";
   return `
   <h1>チェックサムシードの補正</h1>
-  <p class="muted">現在のシード: <code>0x${escapeHtml(seedHex)}</code></p>
+  ${seedStatusBlock(status)}
   ${pendingListHtml(pending)}
   ${errorBlock}
   <form method="post" action="/seed">
     <label for="url">正しい 1R URL</label>
     <input id="url" name="url" type="url" required placeholder="https://www.jra.go.jp/JRADB/accessD.html?CNAME=..."${value}${disabled}>
-    <button type="submit"${disabled}>シードを更新してキューに投入</button>
+    <button type="submit"${disabled}>この場のシードを更新してキューに投入</button>
   </form>
   <nav class="links" aria-label="他の機能">
     <a href="/kick">予想を実行</a>
@@ -93,11 +117,10 @@ export async function handleSeedRequest(
   }
 
   const pending = await getPendingCorrections(env.CHECKSUM_SEED);
-  const stored = await getStoredSeedRecord(env.CHECKSUM_SEED);
-  const seedHex = (stored?.seed ?? DEFAULT_SEED).toString(16).toUpperCase().padStart(2, "0");
+  const status = await loadSeedOverview(env.CHECKSUM_SEED);
 
   if (req.method === "GET") {
-    return htmlPage("チェックサムシードの補正", formHtml({ pending, seedHex }));
+    return htmlPage("チェックサムシードの補正", formHtml({ pending, status }));
   }
 
   const form = await req.formData();
@@ -114,7 +137,7 @@ export async function handleSeedRequest(
   if (!validated.ok) {
     return htmlPage(
       "チェックサムシードの補正",
-      formHtml({ pending, seedHex, error: validated.error, submittedUrl: rawUrl }),
+      formHtml({ pending, status, error: validated.error, submittedUrl: rawUrl }),
       400
     );
   }
@@ -129,7 +152,7 @@ export async function handleSeedRequest(
       "チェックサムシードの補正",
       formHtml({
         pending,
-        seedHex,
+        status,
         error: `入力 URL は出馬表として検証できませんでした（${check.kind}: ${check.reason ?? "不明"}）`,
         submittedUrl: rawUrl,
       }),
@@ -137,11 +160,19 @@ export async function handleSeedRequest(
     );
   }
 
-  await saveSeed(env.CHECKSUM_SEED, {
+  const updated = {
+    venueCode: validated.parsed.venueCode,
+    year: validated.parsed.year,
+    kai: validated.parsed.kai,
+    seed: validated.seed,
+  };
+  await saveVenueSeed(env.CHECKSUM_SEED, {
     seed: validated.seed,
     sourceUrl: validated.parsed.url,
     date: validated.parsed.date,
     venueCode: validated.parsed.venueCode,
+    year: validated.parsed.year,
+    kai: validated.parsed.kai,
   });
 
   const pendingForEnqueue = remapPendingForCorrectedUrl(pending, {
@@ -149,7 +180,7 @@ export async function handleSeedRequest(
     venueCode: validated.parsed.venueCode,
     correctedDate: validated.parsed.date,
   });
-  const results = await enqueue(validated.seed, pendingForEnqueue);
+  const results = await enqueue(updated, pendingForEnqueue);
   const remaining: PendingCorrection[] = results
     .filter((r) => r.stillFailed.length > 0)
     .map((r) => ({
@@ -159,7 +190,9 @@ export async function handleSeedRequest(
     }));
   await setPendingCorrections(env.CHECKSUM_SEED, remaining);
 
-  const newHex = validated.seed.toString(16).toUpperCase().padStart(2, "0");
+  const newHex = formatSeedHex(validated.seed);
+  const courseName = venueName(validated.parsed.venueCode);
+  const updatedStatus = await loadSeedOverview(env.CHECKSUM_SEED);
   const blocks = results
     .map((r) => {
       const failed =
@@ -179,7 +212,8 @@ export async function handleSeedRequest(
     "シードを更新しました",
     `
   <h1>シードを更新しました</h1>
-  <p>新しいシード: <code>0x${escapeHtml(newHex)}</code>（次の 1R エラーまで保持します）</p>
+  <p>${escapeHtml(courseName)}（${escapeHtml(validated.parsed.venueCode)}） ${validated.parsed.year}年${validated.parsed.kai}回のシードを <code>0x${escapeHtml(newHex)}</code> に更新しました。他の場のシードは変更していません。</p>
+  ${seedStatusBlock(updatedStatus)}
   ${blocks || "<p>投入対象はありませんでした。</p>"}
   <p><a class="btn" href="/seed">補正ページに戻る</a></p>
   <nav class="links" aria-label="他の機能">

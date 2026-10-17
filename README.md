@@ -17,7 +17,7 @@ GET /            → 馬柱 URL の一覧のみ（キュー投入も予想もし
 GET /kick        → 今週の開催から日付・場・レースを選んで投入する画面（Access 必須・スマホ向け）
 GET /baba/latest → 最新の馬場状態のみ（認証なし・AI / HTTP ツール向け）
 GET /verify      → 各場 1R の URL 検証のみ（認証必須・投入なし）
-GET /seed        → 失敗した場の正しい 1R URL を入れて seed を更新し、Queue へ再投入（Access 必須）
+GET /seed        → 失敗した場の正しい 1R URL を入れて、その場の seed だけ更新し、Queue へ再投入（Access 必須）
 ```
 
 | ハンドラ | 役割 |
@@ -27,7 +27,7 @@ GET /seed        → 失敗した場の正しい 1R URL を入れて seed を更
 | `GET /kick` または `POST /kick` | スマホ向けの予想キック画面。今週（月曜〜日曜＋週明け月曜の祝日開催）の日付・場・レースをセレクトで選んで投入する。場とレース番号は未指定ならその日の全候補。認証は `/run` と同じ。画面から馬場状態・シード補正へも移れる |
 | `GET /run` または `POST /run` | 同じ開催を Queue へ投入する。投入前に各場 1R の URL を検証する。ブラウザは Cloudflare Access、CLI は `Authorization: Bearer <PREDICT_SECRET>`。ブラウザでクエリ無しの `GET /run` は `/kick` と同じフォーム。CLI や `?date=` 付き、`POST` は投入。本文は `text/plain`（ブラウザは HTML）で `Enqueued N races for YYYY-MM-DD` のあと `場コード:レース番号R URL` |
 | `GET /verify` または `POST /verify` | 各場 1R だけを検証する（Queue に載せない）。認証は `/run` と同じ。`?notify=1` で失敗時にメールも送る |
-| `GET /seed` または `POST /seed` | 1R がパラメータエラーだった場の正しい URL を入力する。認証は `/run` と同じ（Cloudflare Access または `PREDICT_SECRET`）。成功すると seed を KV に保存し、失敗していた場を Queue へ再投入する |
+| `GET /seed` または `POST /seed` | 1R がパラメータエラーだった場の正しい URL を入力する。認証は `/run` と同じ（Cloudflare Access または `PREDICT_SECRET`）。成功するとその URL の場・年・回の seed だけを KV に保存し、失敗していた場を各場の seed で再生成して Queue へ再投入する |
 | `GET /baba/latest` | 各場の**最新計測だけ**を JSON で返す。認証なし。Dify の HTTP リクエストツールなど AI から読む用。履歴やパース生データは含まない |
 | `GET /baba` | 馬場データの確認用ダンプ（全計測）。認証なし。キュー投入なし |
 | `GET /robots.txt` | クローラ向けに `Disallow: /`（主要 AI ボット UA も明示）。索引・学習クローラ向けの最低限対策 |
@@ -102,7 +102,7 @@ npm install
 
 `/run`・`/kick`・`/verify`・`/seed` は `CF_ACCESS_*` か `PREDICT_SECRET` の少なくとも一方が無いと `503` です。インデックス `/` と `/baba`・`/baba/latest` は認証しません。
 
-チェックサムの加算定数（seed）は Workers KV（バインディング `CHECKSUM_SEED`）に保持します。未設定時の初期値は `0x4B`（2026 年の定数）です。`formulaVersion` が 2 でない古いレコードは無視します。名前空間の表示名が違っていても、`wrangler.jsonc` の `binding` が `CHECKSUM_SEED` なら Worker から使えます。
+チェックサムの加算定数（seed）は Workers KV（バインディング `CHECKSUM_SEED`）に保持します。未設定時の初期値は `0x4B`（2026 年の定数）です。`formulaVersion` が 2 でない古いレコードは、共通キーでも場ごとのキーでも無視します。場・年・回次の上書き `checksum_seed:{場コード}:{年}:{回次}`（例: `checksum_seed:04:2026:04`）がある開催だけ、共通キーの代わりにその値を使います。上書きが無い間の URL は、共通キーだけのときと同じです。`/seed` は共通キーを上書きしません。名前空間の表示名が違っていても、`wrangler.jsonc` の `binding` が `CHECKSUM_SEED` なら Worker から使えます。
 
 メール送信は Cloudflare Email Service の `send_email` バインディング（`EMAIL`）を使います。Resend 等の外部 API キーは不要です。検証済み Destination 宛てのみ（自分宛通知）なので Workers Free でも利用できます。
 
@@ -148,7 +148,7 @@ Queue consumer が `DIFY_API_URL` へ `POST` する JSON:
 | HTTP 408 / 504 / 524、またはストリーム切断 | ack（再実行しない） |
 | 上記以外のエラー（LLM／実行失敗、429 など） | 最大 3 回リトライ。尽きるとメール通知して ack |
 
-チェックサムは場・回次・日次・月・日を、それぞれ十の位と一の位に分けて足します。2026-06 から 2026-10 の実 URL（小倉の場コード 10、函館の日次 10〜12、2026-10-18 の新潟・東京・京都を含む）で、同じ seed が場をまたいで一致することを確認しています。JRA 側で年項などの定数が変わったときだけ `/seed` で正しい 1R URL を入れ、seed を更新してください。
+チェックサムは場・回次・日次・月・日を、それぞれ十の位と一の位に分けて足します。2026-06 から 2026-10 の実 URL（小倉の場コード 10、函館の日次 10〜12、2026-10-18 の新潟・東京・京都を含む）で、同じ seed が場をまたいで一致することを確認しています。ある場だけ合わせたいときは `/seed` でその場の 1R URL を入れ、その場・年・回だけ別の seed を保存します。共通 seed は変わりません。
 
 ## 各場 1R の URL 検証とメール通知
 
@@ -157,7 +157,7 @@ Cron および `/run` はキュー投入の直前に、**各場の 1R だけ** J
 | 結果 | 動作 |
 | --- | --- |
 | 出馬表（OK） | その場の 1〜12R を通常どおり投入 |
-| パラメータエラー等 | その場の全レースを投入スキップし、メール通知（設定時）。本文に `/seed` へのリンクを付ける。Access 通過後、失敗した場の正しい 1R URL を 1 本入れると seed を更新し、失敗していた場を Queue へ再投入する |
+| パラメータエラー等 | その場の全レースを投入スキップし、メール通知（設定時）。本文に `/seed` へのリンクを付ける。Access 通過後、失敗した場の正しい 1R URL を入れると、その場・年・回の seed だけを更新し、失敗していた場を各場の seed で Queue へ再投入する |
 | 取得失敗（ネットワーク等） | メール通知（設定時）しつつ、その場は投入を続行。seed は変えない |
 
 通知には [Cloudflare Email Service](https://developers.cloudflare.com/email-service/)（検証済み Destination 宛て）を使います。外部のメール API キーは不要です。
@@ -192,18 +192,18 @@ Verified 2 venue 1R URL(s) for 2026-09-12
 09:1R ok 出馬表ページ https://jra.jp/...
 ```
 
-エラー時は HTTP `422` と `error_page` 行が返ります。パラメータエラーの通知メールから `/seed` を開き、正しい 1R URL を入れると seed が KV に保存されます。
+エラー時は HTTP `422` と `error_page` 行が返ります。パラメータエラーの通知メールから `/seed` を開き、その場の正しい 1R URL を入れると、その場の seed が KV に保存されます。
 
 ### シード補正 `GET|POST /seed`
 
-URL 生成の加算定数（seed）は、正しい 1R URL から逆算できます。月・日・日次は式に入っているので、同じ seed でその日の全場を作れます。JRA 側の定数（年項など）が変わって 1R がエラーページになったときだけ人手で更新し、次の失敗まで同じ seed を使います。
+URL 生成の加算定数（seed）は、正しい 1R URL から逆算できます。月・日・日次は式に入っているので、場ごとの上書きが無い限り、同じ seed でその日の全場を作れます。ある場だけ外れたときだけ `/seed` でその場の 1R URL を入れます。更新されるのはその場・年・回の上書きだけで、共通 seed も他の場も変わりません。`formulaVersion` が 2 でない古い上書きは無視します。
 
 1. メールのリンク `https://jra-dify-pipeline.hdsk.workers.dev/seed` を開く（Cloudflare Access）
-2. 失敗した場のうち、どれか 1 場の正しい 1R URL を貼る（PC の `jra.jp` でもスマホの `www.jra.go.jp` でも可）
-3. Worker が JRA で出馬表か確認し、seed を KV に保存する
-4. 失敗していた日付・場の URL を新しい seed で再生成し、Queue へ投入する
+2. 失敗した場の正しい 1R URL を貼る（PC の `jra.jp` でもスマホの `www.jra.go.jp` でも可）。複数場が失敗しているときは、場ごとに繰り返す
+3. Worker が JRA で出馬表か確認し、その URL の場・年・回の seed だけを KV に保存する
+4. 失敗していた日付・場の URL を、それぞれの seed で再生成し、検証に通った場を Queue へ投入する
 
-回次・日次が開催表と違う URL は拒否します（seed ではなく開催表の問題）。代替開催などで正しい 1R の日付が失敗記録と違う場合は、同じ場なら受け付けて失敗記録の日付を差し替えます。補正待ちの失敗が無いときは seed を更新できません。
+場ごとの上書きがまだ無い場は、従来の共通キー `checksum_seed` を使います。共通キーも場ごとのキーも、`formulaVersion` が 2 でなければ無視して既定の `0x4B` に落ちます。`/seed` は共通キーを上書きしません。画面には共通シードと、保存済みの場・年・回ごとの値を出します。回次・日次が開催表と違う URL は拒否します（seed ではなく開催表の問題）。代替開催などで正しい 1R の日付が失敗記録と違う場合は、同じ場なら受け付けて失敗記録の日付を差し替えます。補正待ちの失敗が無いときは seed を更新できません。
 
 CLI から試す場合:
 
@@ -405,8 +405,8 @@ npm run deploy
 | Cron で開催なし | `console.log` | `No race scheduled for tomorrow: YYYY-MM-DD` |
 | 1R URL 検証 | `console.log` / `console.error` | `1R verify YYYY-MM-DD 場:06 ok\|error_page\|fetch_failed ...` |
 | メール通知 | `console.log` | `Notifying race URL failures for YYYY-MM-DD: N venue(s)` |
-| キュー投入成功（Cron） | `console.log` | `Successfully enqueued N races for YYYY-MM-DD (seed=0x4B)` |
-| シード更新後の再投入 | `console.log` | `Seed 0x.. re-enqueue YYYY-MM-DD: N races, stillFailed=0` |
+| キュー投入成功（Cron） | `console.log` | `Successfully enqueued N races for YYYY-MM-DD (seeds=04=0x4B(default),05=0x4B(default))`。場ごとの上書きがあるときは `04=0x10` のように source なし |
+| シード更新後の再投入 | `console.log` | `Seed re-enqueue YYYY-MM-DD: N races, stillFailed=0 (04=0x10,05=0x4B(global))` |
 | Dify 呼び出し直前 | `console.log` | `Executing Dify API (streaming, attempt=N): YYYY-MM-DD 場:06 1R <url>` |
 | Dify 成功 | `console.log` | `Dify succeeded: ...` |
 | Dify タイムアウト／切断 | `console.warn` | `Dify timeout\|disconnect (ack, no retry): ...` |
