@@ -102,7 +102,7 @@ npm install
 
 `/run`・`/kick`・`/verify`・`/seed` は `CF_ACCESS_*` か `PREDICT_SECRET` の少なくとも一方が無いと `503` です。インデックス `/` と `/baba`・`/baba/latest` は認証しません。
 
-チェックサムの加算定数（seed）は Workers KV（バインディング `CHECKSUM_SEED`）に保持します。未設定時の初期値は `0x16` です。名前空間の表示名が違っていても、`wrangler.jsonc` の `binding` が `CHECKSUM_SEED` なら Worker から使えます。
+チェックサムの加算定数（seed）は Workers KV（バインディング `CHECKSUM_SEED`）に保持します。未設定時の初期値は `0x4B`（2026 年の定数）です。`formulaVersion` が 2 でない古いレコードは無視します。名前空間の表示名が違っていても、`wrangler.jsonc` の `binding` が `CHECKSUM_SEED` なら Worker から使えます。
 
 メール送信は Cloudflare Email Service の `send_email` バインディング（`EMAIL`）を使います。Resend 等の外部 API キーは不要です。検証済み Destination 宛てのみ（自分宛通知）なので Workers Free でも利用できます。
 
@@ -148,7 +148,7 @@ Queue consumer が `DIFY_API_URL` へ `POST` する JSON:
 | HTTP 408 / 504 / 524、またはストリーム切断 | ack（再実行しない） |
 | 上記以外のエラー（LLM／実行失敗、429 など） | 最大 3 回リトライ。尽きるとメール通知して ack |
 
-チェックサムは 2026-09-06 / 09-12 / 09-13 の実 URL で検証済みです。月の項は 9 月サンプルのみなので、不足分は KV の seed に吸収します。1R がパラメータエラーになったら `/seed` で正しい 1R URL を入れ、seed を更新してください。
+チェックサムは場・回次・日次・月・日を、それぞれ十の位と一の位に分けて足します。2026-06 から 2026-10 の実 URL（小倉の場コード 10、函館の日次 10〜12、2026-10-18 の新潟・東京・京都を含む）で、同じ seed が場をまたいで一致することを確認しています。JRA 側で年項などの定数が変わったときだけ `/seed` で正しい 1R URL を入れ、seed を更新してください。
 
 ## 各場 1R の URL 検証とメール通知
 
@@ -196,7 +196,7 @@ Verified 2 venue 1R URL(s) for 2026-09-12
 
 ### シード補正 `GET|POST /seed`
 
-URL 生成の加算定数（seed）は、正しい 1R URL から逆算できます。JRA 側の定数や未実装の月項が変わると 1R がエラーページになります。そのときだけ人手で更新し、次の失敗まで同じ seed を使います。
+URL 生成の加算定数（seed）は、正しい 1R URL から逆算できます。月・日・日次は式に入っているので、同じ seed でその日の全場を作れます。JRA 側の定数（年項など）が変わって 1R がエラーページになったときだけ人手で更新し、次の失敗まで同じ seed を使います。
 
 1. メールのリンク `https://jra-dify-pipeline.hdsk.workers.dev/seed` を開く（Cloudflare Access）
 2. 失敗した場のうち、どれか 1 場の正しい 1R URL を貼る（PC の `jra.jp` でもスマホの `www.jra.go.jp` でも可）
@@ -405,7 +405,7 @@ npm run deploy
 | Cron で開催なし | `console.log` | `No race scheduled for tomorrow: YYYY-MM-DD` |
 | 1R URL 検証 | `console.log` / `console.error` | `1R verify YYYY-MM-DD 場:06 ok\|error_page\|fetch_failed ...` |
 | メール通知 | `console.log` | `Notifying race URL failures for YYYY-MM-DD: N venue(s)` |
-| キュー投入成功（Cron） | `console.log` | `Successfully enqueued N races for YYYY-MM-DD (seed=0x16)` |
+| キュー投入成功（Cron） | `console.log` | `Successfully enqueued N races for YYYY-MM-DD (seed=0x4B)` |
 | シード更新後の再投入 | `console.log` | `Seed 0x.. re-enqueue YYYY-MM-DD: N races, stillFailed=0` |
 | Dify 呼び出し直前 | `console.log` | `Executing Dify API (streaming, attempt=N): YYYY-MM-DD 場:06 1R <url>` |
 | Dify 成功 | `console.log` | `Dify succeeded: ...` |

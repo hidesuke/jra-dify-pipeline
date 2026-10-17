@@ -4,19 +4,36 @@
  * Usage: node scripts/test-checksum.mjs
  */
 
-const DEFAULT_SEED = 0x16;
+const DEFAULT_SEED = 0x4b;
 const DEFAULT_PREFIX = "pw01dde01";
 const NAKAYAMA_1R =
   "https://jra.jp/JRADB/accessD.html?CNAME=pw01dde0106202604030120260912/4B";
 
-function dayBcd(dateStrCompact) {
-  const day = Number(dateStrCompact.slice(6, 8));
-  return ((Math.floor(day / 10) << 4) | (day % 10)) & 0xff;
+function decimalDigits(value) {
+  const tens = Math.floor(value / 10);
+  return { tens, ones: value - tens * 10 };
+}
+
+function checksumBase(venueCode, kai, nichi, dateStrCompact) {
+  const venue = decimalDigits(Number(venueCode));
+  const meetingDay = decimalDigits(nichi);
+  const month = decimalDigits(Number(dateStrCompact.slice(4, 6)));
+  const day = decimalDigits(Number(dateStrCompact.slice(6, 8)));
+  return (
+    venue.tens * 0x29 +
+    venue.ones * 0x4a +
+    kai * 0x31 +
+    meetingDay.tens * 0x10 +
+    meetingDay.ones * 0x73 +
+    day.tens * 0x5a +
+    day.ones * 0xbd +
+    month.tens * 0x18 +
+    month.ones * 0x7b
+  );
 }
 
 function calculateInitialChecksum(venueCode, kai, nichi, dateStrCompact, seed = DEFAULT_SEED) {
-  const venue = Number(venueCode);
-  return (venue * 0x4a + kai * 0x75 + nichi * 0x95 + dayBcd(dateStrCompact) * 0x9b + seed) % 256;
+  return (checksumBase(venueCode, kai, nichi, dateStrCompact) + seed) % 256;
 }
 
 function generateRaceUrls(item, dateStrCompact, prefix = DEFAULT_PREFIX, seed = DEFAULT_SEED) {
@@ -63,9 +80,8 @@ function parseRaceUrl(input) {
 }
 
 function extractSeedFrom1R(parsed) {
-  const venue = Number(parsed.venueCode);
-  const base = venue * 0x4a + parsed.kai * 0x75 + parsed.nichi * 0x95 + dayBcd(parsed.dateCompact) * 0x9b;
-  return ((parsed.checksum - (base % 256)) + 256) % 256;
+  const base = checksumBase(parsed.venueCode, parsed.kai, parsed.nichi, parsed.dateCompact);
+  return (parsed.checksum - (base % 256) + 256) % 256;
 }
 
 function validateSubmittedRaceUrl({ rawUrl, pending, expectedPrefix, getSchedule }) {
@@ -219,7 +235,7 @@ assert(urls[1].url.endsWith("/00"), `2R checksum is 1R-0x4B (got ${urls[1].url.s
 
 const parsed = parseRaceUrl(NAKAYAMA_1R);
 assert(parsed.venueCode === "06" && parsed.raceNo === 1 && parsed.date === "2026-09-12", "parse known 1R");
-assert(extractSeedFrom1R(parsed) === 0x16, "extract seed 0x16 from known 1R");
+assert(extractSeedFrom1R(parsed) === 0x4b, "extract seed 0x4B from known 1R");
 
 const mobile =
   "https://www.jra.go.jp/JRADB/accessD.html?CNAME=pw01dde0106202604050120260919/5C";
@@ -231,7 +247,7 @@ assert(
     mobileParsed.checksumHex === "5C",
   "parse smartphone www.jra.go.jp 1R"
 );
-assert(extractSeedFrom1R(mobileParsed) === 0xc0, `seed from mobile 1R is 0xC0 (got 0x${extractSeedFrom1R(mobileParsed).toString(16)})`);
+assert(extractSeedFrom1R(mobileParsed) === 0x4b, `seed from mobile 1R is 0x4B (got 0x${extractSeedFrom1R(mobileParsed).toString(16)})`);
 assert(
   parseRaceUrl("https://example.com/JRADB/accessD.html?CNAME=pw01dde0106202604030120260912/4B").error,
   "reject non-JRA host"
@@ -257,7 +273,7 @@ const okSubmit = validateSubmittedRaceUrl({
   expectedPrefix: DEFAULT_PREFIX,
   getSchedule,
 });
-assert(okSubmit.ok && okSubmit.seed === 0x16, "one venue 1R is enough to recover seed");
+assert(okSubmit.ok && okSubmit.seed === 0x4b, "one venue 1R is enough to recover seed");
 
 const mobileOk = validateSubmittedRaceUrl({
   rawUrl: mobile,
@@ -270,7 +286,7 @@ const mobileOk = validateSubmittedRaceUrl({
   expectedPrefix: DEFAULT_PREFIX,
   getSchedule,
 });
-assert(mobileOk.ok && mobileOk.seed === 0xc0, "www.jra.go.jp 1R recovers seed");
+assert(mobileOk.ok && mobileOk.seed === 0x4b, "www.jra.go.jp 1R recovers the same seed");
 
 const race2 = validateSubmittedRaceUrl({
   rawUrl: urls[1].url,
@@ -308,7 +324,7 @@ assert(!emptyPending.ok && emptyPending.error.includes("補正待ち"), "reject 
     postponed.ok && postponed.pendingDate === "2026-09-21" && postponed.parsed.date === "2026-09-22",
     `accept postponed 1R date mismatch (pendingDate=${postponed.pendingDate}, urlDate=${postponed.parsed?.date})`
   );
-  assert(postponed.seed === 0x38, `substitute 1R seed is 0x38 (got 0x${postponed.seed?.toString(16)})`);
+  assert(postponed.seed === 0x4b, `substitute 1R seed is 0x4B (got 0x${postponed.seed?.toString(16)})`);
 
   const remapped = remapPendingForCorrectedUrl(postponedPending, {
     pendingDate: postponed.pendingDate,
@@ -321,7 +337,7 @@ assert(!emptyPending.ok && emptyPending.error.includes("補正待ち"), "reject 
 
 {
   const kv = new MemorySeedKv();
-  assert((await getStoredSeed(kv)) === DEFAULT_SEED, "missing KV seed falls back to 0x16");
+  assert((await getStoredSeed(kv)) === DEFAULT_SEED, "missing KV seed falls back to 0x4B");
   await saveSeed(kv, { seed: 0x99, sourceUrl: NAKAYAMA_1R });
   assert((await getStoredSeed(kv)) === 0x99, "persisted seed is read back");
   await addPendingCorrection(kv, "2026-09-12", [{ venueCode: "06", url: "u1" }]);
@@ -348,6 +364,42 @@ assert(!emptyPending.ok && emptyPending.error.includes("補正待ち"), "reject 
 {
   const env = { CF_ACCESS_AUD: "aud-run, aud-seed" };
   assert(configuredAccessAuds(env).join(",") === "aud-run,aud-seed", "comma-separated Access AUDs");
+}
+
+{
+  // 2026-10-18: 新潟は 4回2日、東京・京都は 4回7日。同じ seed で 1R が揃う。
+  const niigata = { venueCode: "04", year: 2026, kai: 4, nichi: 2 };
+  const tokyo = { venueCode: "05", year: 2026, kai: 4, nichi: 7 };
+  const kyoto = { venueCode: "08", year: 2026, kai: 4, nichi: 7 };
+  const niigataUrl = generateRaceUrls(niigata, "20261018")[0].url;
+  const tokyoUrl = generateRaceUrls(tokyo, "20261018")[0].url;
+  const kyotoUrl = generateRaceUrls(kyoto, "20261018")[0].url;
+  assert(
+    niigataUrl.endsWith("/77"),
+    `Niigata 2026-10-18 1R checksum is 0x77 (got ${niigataUrl.slice(-2)})`
+  );
+  assert(tokyoUrl.endsWith("/00"), `Tokyo 2026-10-18 1R checksum is 0x00 (got ${tokyoUrl.slice(-2)})`);
+  assert(kyotoUrl.endsWith("/DE"), `Kyoto 2026-10-18 1R checksum is 0xDE (got ${kyotoUrl.slice(-2)})`);
+  assert(
+    extractSeedFrom1R(parseRaceUrl(niigataUrl)) === extractSeedFrom1R(parseRaceUrl(tokyoUrl)) &&
+      extractSeedFrom1R(parseRaceUrl(kyotoUrl)) === DEFAULT_SEED,
+    "Niigata, Tokyo, and Kyoto share the default seed"
+  );
+  assert(calculateInitialChecksum("10", 2, 3, "20260704") === 0x80, "venue 10 (Kokura) uses the tens digit");
+  assert(calculateInitialChecksum("02", 1, 10, "20260712") === 0x51, "nichi 10 uses the tens digit");
+  assert(calculateInitialChecksum("02", 1, 12, "20260719") === 0x62, "nichi 12 uses tens and ones");
+}
+
+{
+  const { readStoredSeed, SEED_FORMULA_VERSION } = await import("../src/checksum.ts");
+  assert(readStoredSeed(null) === null, "missing seed record is not usable");
+  assert(readStoredSeed({ seed: 0x1f }) === null, "legacy seed without formulaVersion is ignored");
+  assert(
+    readStoredSeed({ seed: 0x1f, formulaVersion: 1 }) === null,
+    "seed from the previous formula is ignored"
+  );
+  assert(readStoredSeed({ seed: 0x99, formulaVersion: SEED_FORMULA_VERSION }) === 0x99, "versioned seed is accepted");
+  assert(readStoredSeed({ seed: 1.5, formulaVersion: SEED_FORMULA_VERSION }) === null, "non-integer seed is rejected");
 }
 
 if (failed) {
