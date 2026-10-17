@@ -67,7 +67,7 @@ export function formatRaceUrlFailureEmail(params: {
     lines.push(`パラメータエラーの場はキュー投入をスキップしています。`);
     if (seedFormUrl) {
       lines.push(``);
-      lines.push(`チェックサムのシードが変わった可能性がある場合は、次のページで失敗した場の正しい 1R URL を入力してください（Cloudflare Access で保護）。どれか 1 本で全場のシードが更新され、失敗していた場を Queue に再投入します。`);
+      lines.push(`チェックサムのシードが変わった可能性がある場合は、次のページで失敗した場の正しい 1R URL を入力してください（Cloudflare Access で保護）。更新されるのはその URL の場・年・回の上書きだけです。共通シードは変わりません。失敗している場が複数あるときは、場ごとに 1R URL を入れてください。各場の seed で再生成し、検証に通った場を Queue に再投入します。`);
       lines.push(seedFormUrl);
     }
     lines.push(``);

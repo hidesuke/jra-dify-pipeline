@@ -12,6 +12,7 @@
 // 旧式（回次 * 0x75、日次 * 0x95、日を BCD のまま * 0x9B）は日次の係数が
 // 0x22 だけ大きく、同じ日でも日次が違う場の見かけの seed がずれる。
 // そのずれがあると 1R 検証がパラメータエラーになり、その場だけ投入されない。
+// 場・年・回次の上書きがある開催だけ、共通 seed の代わりにそれを使う（src/seedStore.ts）。
 
 import type { ScheduleItem } from "./schedules";
 import type { PendingCorrection, PendingVenue } from "./seedStore";

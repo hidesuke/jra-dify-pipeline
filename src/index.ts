@@ -10,18 +10,15 @@ import {
 } from "./baba";
 import { notifyDifyFailure, notifyRaceUrlFailures } from "./notify";
 import { verifyVenue1RUrls, type RaceUrlCheck } from "./verifyRaceUrl";
-import {
-  DEFAULT_PREFIX,
-  compactDate,
-  generateRaceUrls,
-} from "./checksum";
+import { DEFAULT_PREFIX } from "./checksum";
 import {
   addPendingCorrection,
-  getStoredSeed,
+  formatResolvedSeeds,
   seedFormUrl,
   type PendingCorrection,
 } from "./seedStore";
-import { handleSeedRequest, type SeedEnqueueResult } from "./seedForm";
+import { rowsForSchedules, type RaceUrlRow } from "./raceUrls";
+import { handleSeedRequest, type SeedEnqueueResult, type UpdatedVenueSeed } from "./seedForm";
 import {
   acceptsHtml,
   renderKickForm,
@@ -81,7 +78,7 @@ export interface RaceMessage {
   baba?: BabaAttachment;
 }
 
-type RaceRow = { venueCode: string; raceNo: number; url: string };
+type RaceRow = RaceUrlRow;
 
 function prefixOf(env: Env): string {
   return env.PREFIX_CODE?.trim() || DEFAULT_PREFIX;
@@ -119,26 +116,6 @@ async function sendRaceBatch(env: Env, messages: MessageSendRequest<RaceMessage>
   }
 }
 
-async function rowsForSchedules(
-  schedules: ScheduleItem[],
-  date: string,
-  env: Env,
-  seed: number,
-  raceNo?: number
-): Promise<RaceRow[]> {
-  const dateCompact = compactDate(date);
-  const prefix = prefixOf(env);
-  return schedules.flatMap((s) =>
-    generateRaceUrls(s, dateCompact, prefix, seed)
-      .filter((r) => raceNo === undefined || r.raceNo === raceNo)
-      .map((r) => ({
-        venueCode: s.venueCode,
-        raceNo: r.raceNo,
-        url: r.url,
-      }))
-  );
-}
-
 // ---------------------------------------------------------
 // Cloudflare Worker Handler
 // ---------------------------------------------------------
@@ -154,8 +131,12 @@ export default {
       return;
     }
 
-    const seed = await getStoredSeed(env.CHECKSUM_SEED);
-    const allRows = await rowsForSchedules(schedules, targetDateKey, env, seed);
+    const { rows: allRows, seeds } = await rowsForSchedules(
+      env.CHECKSUM_SEED,
+      schedules,
+      targetDateKey,
+      prefixOf(env)
+    );
 
     const { rows, checks } = await filterRowsBy1RVerification(env, targetDateKey, allRows);
     logVerification(targetDateKey, checks);
@@ -177,7 +158,9 @@ export default {
     }));
 
     await sendRaceBatch(env, messages);
-    console.log(`Successfully enqueued ${messages.length} races for ${targetDateKey} (seed=0x${seed.toString(16).toUpperCase().padStart(2, "0")})`);
+    console.log(
+      `Successfully enqueued ${messages.length} races for ${targetDateKey} (seeds=${formatResolvedSeeds(seeds)})`
+    );
   },
 
   // 2. Queue Consumer: Dify API を streaming でキック
@@ -283,7 +266,9 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
   if (path === "/seed") {
     const denied = await authorizePredict(req, env, ctx);
     if (denied) return denied;
-    return handleSeedRequest(req, env, (seed, pending) => enqueueAfterSeedUpdate(env, seed, pending));
+    return handleSeedRequest(req, env, (updated, pending) =>
+      enqueueAfterSeedUpdate(env, updated, pending)
+    );
   }
 
   if (path === "/baba/latest") {
@@ -365,18 +350,26 @@ function logVerification(date: string, checks: RaceUrlCheck[]): void {
   }
 }
 
-/** シード更新後、失敗していた日付・場を再生成して Queue へ入れる */
+/** シード更新後、失敗していた日付・場を各場の seed で再生成して Queue へ入れる */
 async function enqueueAfterSeedUpdate(
   env: Env,
-  seed: number,
+  updated: UpdatedVenueSeed,
   pending: PendingCorrection[]
 ): Promise<SeedEnqueueResult[]> {
   const results: SeedEnqueueResult[] = [];
+  const prefix = prefixOf(env);
   for (const item of pending) {
     const schedules = getSchedulesForDate(item.date);
     const wanted = new Set(item.venues.map((v) => v.venueCode));
     const selected = (schedules ?? []).filter((s) => wanted.has(s.venueCode));
-    const rows = await rowsForSchedules(selected, item.date, env, seed);
+    const { rows, seeds } = await rowsForSchedules(
+      env.CHECKSUM_SEED,
+      selected,
+      item.date,
+      prefix,
+      undefined,
+      updated
+    );
     const checks = await verifyVenue1RUrls(rows);
     logVerification(item.date, checks);
     const stillBad = new Set(
@@ -415,7 +408,7 @@ async function enqueueAfterSeedUpdate(
       checks,
     });
     console.log(
-      `Seed 0x${seed.toString(16).toUpperCase().padStart(2, "0")} re-enqueue ${item.date}: ${messages.length} races, stillFailed=${stillBad.size}`
+      `Seed re-enqueue ${item.date}: ${messages.length} races, stillFailed=${stillBad.size} (${formatResolvedSeeds(seeds)})`
     );
   }
   return results;
@@ -567,8 +560,13 @@ async function resolveRaces(
     return { error: `Invalid race: ${raceFilter}`, status: 400, params };
   }
 
-  const seed = await getStoredSeed(env.CHECKSUM_SEED);
-  const rows = await rowsForSchedules(selected, targetDateKey, env, seed, raceNo);
+  const { rows } = await rowsForSchedules(
+    env.CHECKSUM_SEED,
+    selected,
+    targetDateKey,
+    prefixOf(env),
+    raceNo
+  );
 
   if (rows.length === 0) {
     return { error: `No races matched for ${targetDateKey}`, status: 404, params };
