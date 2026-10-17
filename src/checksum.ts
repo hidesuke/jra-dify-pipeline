@@ -1,13 +1,33 @@
 // JRA 馬柱 URL のチェックサム。
 //
-// 1R = (場 * 0x4A + 回次 * 0x75 + 日次 * 0x95 + 日BCD * 0x9B + seed) % 256
+// 1R は各フィールドを十進の十の位・一の位に分けて足した値の下位 8 bit。
+//   場十の位 * 0x29 + 場一の位 * 0x4A
+//   回次 * 0x31                 （2026 年の回次は 1〜5）
+//   日次十の位 * 0x10 + 日次一の位 * 0x73
+//   日十の位 * 0x5A + 日一の位 * 0xBD
+//   月十の位 * 0x18 + 月一の位 * 0x7B
+//   + seed
 // 2R 以降は -0x4B（9R→10R だけ -0x0B）。
-// seed の既定は 0x16。月の項は 9 月サンプルのみのため、不足分は seed に吸収する。
+// seed の既定 0x4B は 2026 年の年項と接頭辞をまとめた定数で、場には依存しない。
+// 旧式（回次 * 0x75、日次 * 0x95、日を BCD のまま * 0x9B）は日次の係数が
+// 0x22 だけ大きく、同じ日でも日次が違う場の見かけの seed がずれる。
+// そのずれがあると 1R 検証がパラメータエラーになり、その場だけ投入されない。
 
 import type { ScheduleItem } from "./schedules";
 import type { PendingCorrection, PendingVenue } from "./seedStore";
 
-export const DEFAULT_SEED = 0x16;
+export const DEFAULT_SEED = 0x4b;
+/** 旧チェックサム式で保存した seed は場ごとに食い違うため読まない。 */
+export const SEED_FORMULA_VERSION = 2;
+
+export function readStoredSeed(
+  record: { seed?: unknown; formulaVersion?: unknown } | null | undefined
+): number | null {
+  if (!record || record.formulaVersion !== SEED_FORMULA_VERSION) return null;
+  if (typeof record.seed !== "number" || !Number.isInteger(record.seed)) return null;
+  if (record.seed < 0 || record.seed > 255) return null;
+  return record.seed;
+}
 export const DEFAULT_PREFIX = "pw01dde01";
 export const JRA_ACCESS_ORIGIN = "https://jra.jp";
 export const JRA_ACCESS_PATH = "/JRADB/accessD.html";
@@ -41,9 +61,33 @@ export type ValidateCorrectionResult =
   | { ok: true; parsed: ParsedRaceUrl; seed: number; pendingDate: string }
   | { ok: false; error: string };
 
-function dayBcd(dateStrCompact: string): number {
-  const day = Number(dateStrCompact.slice(6, 8));
-  return ((Math.floor(day / 10) << 4) | (day % 10)) & 0xff;
+function decimalDigits(value: number): { tens: number; ones: number } {
+  const tens = Math.floor(value / 10);
+  return { tens, ones: value - tens * 10 };
+}
+
+/** seed を除いた 1R チェックサム。戻り値は 256 で割る前の合計。 */
+export function checksumBase(
+  venueCode: string,
+  kai: number,
+  nichi: number,
+  dateStrCompact: string
+): number {
+  const venue = decimalDigits(Number(venueCode));
+  const meetingDay = decimalDigits(nichi);
+  const month = decimalDigits(Number(dateStrCompact.slice(4, 6)));
+  const day = decimalDigits(Number(dateStrCompact.slice(6, 8)));
+  return (
+    venue.tens * 0x29 +
+    venue.ones * 0x4a +
+    kai * 0x31 +
+    meetingDay.tens * 0x10 +
+    meetingDay.ones * 0x73 +
+    day.tens * 0x5a +
+    day.ones * 0xbd +
+    month.tens * 0x18 +
+    month.ones * 0x7b
+  );
 }
 
 export function calculateInitialChecksum(
@@ -53,8 +97,7 @@ export function calculateInitialChecksum(
   dateStrCompact: string,
   seed = DEFAULT_SEED
 ): number {
-  const venue = Number(venueCode);
-  return (venue * 0x4a + kai * 0x75 + nichi * 0x95 + dayBcd(dateStrCompact) * 0x9b + seed) % 256;
+  return (checksumBase(venueCode, kai, nichi, dateStrCompact) + seed) % 256;
 }
 
 export function generateRaceUrls(
@@ -164,9 +207,8 @@ export function parseRaceUrl(input: string): ParseRaceUrlResult {
 
 /** 1R URL から加算定数 seed を逆算する */
 export function extractSeedFrom1R(parsed: ParsedRaceUrl): number {
-  const venue = Number(parsed.venueCode);
-  const base = venue * 0x4a + parsed.kai * 0x75 + parsed.nichi * 0x95 + dayBcd(parsed.dateCompact) * 0x9b;
-  return ((parsed.checksum - (base % 256)) + 256) % 256;
+  const base = checksumBase(parsed.venueCode, parsed.kai, parsed.nichi, parsed.dateCompact);
+  return (parsed.checksum - (base % 256) + 256) % 256;
 }
 
 export function validateSubmittedRaceUrl(params: {

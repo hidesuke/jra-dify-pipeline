@@ -1,4 +1,4 @@
-import { DEFAULT_SEED } from "./checksum";
+import { DEFAULT_SEED, readStoredSeed, SEED_FORMULA_VERSION } from "./checksum";
 
 export interface SeedKv {
   get(key: string): Promise<string | null>;
@@ -9,6 +9,8 @@ export interface SeedKv {
 export interface StoredSeed {
   seed: number;
   updatedAt: string;
+  /** 2 未満、または欠落は旧式の seed。生成には使わない。 */
+  formulaVersion?: number;
   sourceUrl?: string;
   date?: string;
   venueCode?: string;
@@ -49,7 +51,7 @@ function parseSeedRecord(raw: string | null): StoredSeed | null {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as StoredSeed;
-    if (typeof parsed.seed !== "number" || parsed.seed < 0 || parsed.seed > 255) return null;
+    if (readStoredSeed(parsed) === null) return null;
     return parsed;
   } catch {
     return null;
@@ -76,6 +78,7 @@ export async function saveSeed(
   }
   const stored: StoredSeed = {
     seed: record.seed,
+    formulaVersion: SEED_FORMULA_VERSION,
     updatedAt: record.updatedAt ?? new Date().toISOString(),
     sourceUrl: record.sourceUrl,
     date: record.date,
