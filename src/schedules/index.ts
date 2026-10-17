@@ -1,4 +1,5 @@
 import { SCHEDULE_2026 } from "./2026.ts";
+import { SCHEDULE_2027 } from "./2027.ts";
 import type { ScheduleItem, YearSchedule } from "./types.ts";
 
 export type { ScheduleItem, YearSchedule };
@@ -8,6 +9,7 @@ export type { ScheduleItem, YearSchedule };
  */
 const SCHEDULES_BY_YEAR: Record<number, YearSchedule> = {
   2026: SCHEDULE_2026,
+  2027: SCHEDULE_2027,
 };
 
 export const VENUE_CODE_TO_NAME: Record<string, string> = {
