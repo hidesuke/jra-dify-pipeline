@@ -120,7 +120,8 @@ async function sendRaceBatch(env: Env, messages: MessageSendRequest<RaceMessage>
 // Cloudflare Worker Handler
 // ---------------------------------------------------------
 export default {
-  // 1. Cron Trigger: 翌日分のレースを Queue に送信
+  // 定期予想の Cron は停止（wrangler.jsonc の triggers.crons は []。予想は jra-bashira-pipeline）。
+  // ハンドラは残す。ローカルの scheduled 発火時は、これまでどおり JST 翌日分を Queue に送る。
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     const targetDateKey = jstDateKey(new Date(), 1);
     console.log(`Cron ${controller.cron} target=${targetDateKey}`);
