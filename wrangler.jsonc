@@ -15,7 +15,7 @@
     "NOTIFY_EMAIL": "hidesuke@gmail.com",
     // Email Routing ドメイン上の From
     "NOTIFY_FROM": "noreply@koumeinowana.info",
-    // Cron メールに載せる /seed の origin
+    // 失敗メールに載せる /seed の origin
     "PUBLIC_BASE_URL": "https://jra-dify-pipeline.hdsk.workers.dev"
   },
   // チェックサム seed と 1R 失敗セッション。binding 名は Worker の env.CHECKSUM_SEED と一致させる
@@ -33,12 +33,10 @@
       "remote": true
     }
   ],
+  // 定期の予想キックは jra-bashira-pipeline に移したため停止。
+  // crons を消す・コメントアウトするだけだと本番トリガーが残る。空配列をデプロイして外す。
   "triggers": {
-    "crons": [
-      // Cloudflare の曜日は 1=日 … 7=土。数字の 5/6 は木/金になるので FRI/SAT を使う
-      "0 8 * * FRI", // 金曜 17:00 JST
-      "0 8 * * SAT"  // 土曜 17:00 JST
-    ]
+    "crons": []
   },
   "queues": {
     "producers": [
