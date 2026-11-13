@@ -1,5 +1,5 @@
-import { authorizePredict } from "./access";
-import { getSchedulesForDate, type ScheduleItem } from "./schedules";
+import { authorizePredict } from "./access.ts";
+import { getSchedulesForDate, type ScheduleItem } from "./schedules/index.ts";
 import {
   fetchBaba,
   fetchCourseInfoByVenue,
@@ -7,31 +7,31 @@ import {
   formatBabaSummary,
   buildLatestBaba,
   resolveVenueKey,
-} from "./baba";
-import { notifyDifyFailure, notifyRaceUrlFailures } from "./notify";
-import { verifyVenue1RUrls, type RaceUrlCheck } from "./verifyRaceUrl";
-import { DEFAULT_PREFIX } from "./checksum";
+} from "./baba.ts";
+import { notifyDifyFailure, notifyRaceUrlFailures } from "./notify.ts";
+import { verifyVenue1RUrls, type RaceUrlCheck } from "./verifyRaceUrl.ts";
+import { DEFAULT_PREFIX } from "./checksum.ts";
 import {
   addPendingCorrection,
   formatResolvedSeeds,
   seedFormUrl,
   type PendingCorrection,
-} from "./seedStore";
-import { rowsForSchedules, type RaceUrlRow } from "./raceUrls";
-import { handleSeedRequest, type SeedEnqueueResult, type UpdatedVenueSeed } from "./seedForm";
+} from "./seedStore.ts";
+import { rowsForSchedules, type RaceUrlRow } from "./raceUrls.ts";
+import { handleSeedRequest, type SeedEnqueueResult, type UpdatedVenueSeed } from "./seedForm.ts";
 import {
   acceptsHtml,
   renderKickForm,
   renderKickResult,
   wantsKickForm,
-} from "./kickForm";
+} from "./kickForm.ts";
 import {
   DIFY_QUEUE_MAX_RETRIES,
   isFinalQueueAttempt,
   runDifyWorkflowStreaming,
   shouldRetryOutcome,
-} from "./dify";
-import { robotsTxtResponse, withNoindex } from "./crawlGuard";
+} from "./dify.ts";
+import { robotsTxtResponse, withNoindex } from "./crawlGuard.ts";
 
 export type { ScheduleItem };
 
@@ -120,8 +120,7 @@ async function sendRaceBatch(env: Env, messages: MessageSendRequest<RaceMessage>
 // Cloudflare Worker Handler
 // ---------------------------------------------------------
 export default {
-  // 定期予想の Cron は停止（wrangler.jsonc の triggers.crons は []。予想は jra-bashira-pipeline）。
-  // ハンドラは残す。ローカルの scheduled 発火時は、これまでどおり JST 翌日分を Queue に送る。
+  // Cron Trigger: 金・土 16:45 JST に、JST 翌日分のレースを Queue に送信
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     const targetDateKey = jstDateKey(new Date(), 1);
     console.log(`Cron ${controller.cron} target=${targetDateKey}`);

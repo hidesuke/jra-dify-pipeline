@@ -4,17 +4,16 @@ JRA の開催日ごとに公式レースページ URL を組み立て、Cloudfla
 
 予測ロジック自体はこのリポジトリにはありません。出馬表の取得や予想は `DIFY_API_URL` 先のワークフロー側で行います。
 
-金・土の定期予想キック（Cron）は停止しています。定期実行は [jra-bashira-pipeline](https://github.com/hidesuke/jra-bashira-pipeline) に移しました。この Worker と `GET /baba/latest` は残します。BASHIRA 側が service binding で馬場 API を読むためです。
+金・土の定期予想は、この Worker の Cron（16:45 JST）が再び担当します。
 
 本番 URL: `https://jra-dify-pipeline.hdsk.workers.dev`
 
 ## 仕組み
 
 ```
-（停止）Cron（金・土 17:00 JST） ─ 予想は jra-bashira-pipeline。triggers.crons は []
-GET|POST /run（認証必須） ─┐
-GET|POST /kick（フォーム） ─┴─→ KV の seed で URL 生成 → 各場1R検証 → jra-race-queue → Dify
-                              └─ エラーページならメール（/seed リンク）＋その場をスキップ
+Cron（金・土 16:45 JST） ─┐
+GET|POST /run（認証必須） ─┴─→ KV の seed で URL 生成 → 各場1R検証 → jra-race-queue → Dify
+GET|POST /kick（フォーム）─┘                         └─ エラーページならメール（/seed リンク）＋その場をスキップ
 
 GET /            → 馬柱 URL の一覧のみ（キュー投入も予想もしない）
 GET /kick        → 今週の開催から日付・場・レースを選んで投入する画面（Access 必須・スマホ向け）
@@ -25,7 +24,7 @@ GET /seed        → 失敗した場の正しい 1R URL を入れて、その場
 
 | ハンドラ | 役割 |
 | --- | --- |
-| `scheduled` | ハンドラは残す。本番 Cron は `triggers.crons: []` で停止しており、Cloudflare からは呼ばれない。ローカルで発火したときは JST 翌日の開催を Queue へ投入する |
+| `scheduled` | Cloudflare Cron（金・土 16:45 JST）が呼ぶ。HTTP ではない。JST 翌日の開催を Queue へ投入する |
 | `GET /` | 馬柱 URL の一覧。Queue にも Dify にも載せない。本文は `text/plain` で URL のみ（1 行 1 URL） |
 | `GET /kick` または `POST /kick` | スマホ向けの予想キック画面。今週（月曜〜日曜＋週明け月曜の祝日開催）の日付・場・レースをセレクトで選んで投入する。場とレース番号は未指定ならその日の全候補。認証は `/run` と同じ。画面から馬場状態・シード補正へも移れる |
 | `GET /run` または `POST /run` | 同じ開催を Queue へ投入する。投入前に各場 1R の URL を検証する。ブラウザは Cloudflare Access、CLI は `Authorization: Bearer <PREDICT_SECRET>`。ブラウザでクエリ無しの `GET /run` は `/kick` と同じフォーム。CLI や `?date=` 付き、`POST` は投入。本文は `text/plain`（ブラウザは HTML）で `Enqueued N races for YYYY-MM-DD` のあと `場コード:レース番号R URL` |
@@ -59,11 +58,9 @@ Enqueued 1 races for 2026-09-12
 
 データの出典は JRA の年度開催日割 PDF（[2026年](https://www.jra.go.jp/keiba/program/2026/pdf/nittei.pdf)、変更版 2026.9.6）です。2026 年は全年 110 開催日（札幌〜小倉。うち 2026-09-22 は 09-21 中山の代替）を収録しています。回次・日次が 1 つでもずれるとレース URL のチェックサムが崩れるため、更新時は PDF 巻末の「回 / 日」集計表と件数が一致するか確認してください。
 
-定期の予想キックは止めています。金・土 17:00 JST（`0 8 * * FRI` / `0 8 * * SAT` UTC）の Cron は外し、予想の定期実行は [jra-bashira-pipeline](https://github.com/hidesuke/jra-bashira-pipeline) に移しました。`wrangler.jsonc` の `triggers.crons` は空配列 `[]` です。`crons` キーを消す・コメントアウトするだけだと、デプロイしても本番の Cron が残ります。空配列を明示してデプロイすると本番トリガーが外れます。
+Cron は金・土 16:45 JST です。式は UTC の `45 7 * * FRI` と `45 7 * * SAT` です。発火すると JST の翌日分を Queue へ投入します。Cloudflare の曜日番号は Unix と違い **1=日曜 … 7=土曜** なので、数字の `5`/`6` は木・金になります。曜日は `FRI` / `SAT` で指定してください。月曜開催（例: 2026-09-21 敬老の日・阪神のみ、10-12 スポーツの日、11-23 勤労感謝の日、11-30）や火曜代替（2026-09-22 中山）は自動では流れないので、`/kick` か認証付きの `/run` を使ってください。2026-12-28 は開催なしです。
 
-`scheduled` ハンドラのコードは残しています（本番では呼ばれません）。ローカルでの発火手順は下の「ローカル」を参照してください。再び有効にする場合、Cloudflare の曜日番号は Unix と違い **1=日曜 … 7=土曜** なので、数字の `5`/`6` は木・金になります。曜日は `FRI` / `SAT` で指定してください。月曜開催（例: 2026-09-21 敬老の日・阪神のみ、10-12 スポーツの日、11-23 勤労感謝の日、11-30）や火曜代替（2026-09-22 中山）は、もともと Cron では流れません。手動で流すときは `/kick` か認証付きの `/run` を使ってください。2026-12-28 は開催なしです。
-
-Worker 自体と HTTP ルート（`/baba/latest` を含む）は残しています。[jra-bashira-pipeline](https://github.com/hidesuke/jra-bashira-pipeline) が service binding でこの Worker の `/baba/latest` を読むためです。
+止めるときは `wrangler.jsonc` の `crons` を `[]` にして `npm run deploy` します。`crons` キーを消すだけだと、既存のトリガーが残ります。
 
 ## 前提
 
@@ -85,7 +82,7 @@ npm install
 | `npm run dev` | ローカル開発（`wrangler dev`） |
 | `npm run deploy` | 手元から Cloudflare へデプロイ（普段は `main` へのマージで自動） |
 | `npm run tail` | 本番ログを購読 |
-| `npm test` | 1R 検証とシード逆算のローカルテスト |
+| `npm test` | 1R 検証、シード逆算、scheduled の翌日投入などのローカルテスト |
 | `npm run cf-typegen` | Worker の型定義を生成 |
 
 その他の Wrangler サブコマンド（login / queues / secret など）は `npx wrangler` で実行します。
@@ -157,7 +154,7 @@ Queue consumer が `DIFY_API_URL` へ `POST` する JSON:
 
 ## 各場 1R の URL 検証とメール通知
 
-`scheduled`（本番 Cron は停止）および `/run` はキュー投入の直前に、**各場の 1R だけ** JRA 公式ページを GET し、エラーページでないかを確認します。不正な CNAME でも HTTP は 200 のまま「パラメータエラー」ページになるため、ステータスではなく本文（`パラメータエラー` / `error.css` / `.error_code`、出馬表マーカー欠落）で判定します。
+Cron および `/run` はキュー投入の直前に、**各場の 1R だけ** JRA 公式ページを GET し、エラーページでないかを確認します。不正な CNAME でも HTTP は 200 のまま「パラメータエラー」ページになるため、ステータスではなく本文（`パラメータエラー` / `error.css` / `.error_code`、出馬表マーカー欠落）で判定します。
 
 | 結果 | 動作 |
 | --- | --- |
@@ -222,7 +219,7 @@ curl -H "Authorization: Bearer $PREDICT_SECRET" \
 
 ## 馬場状態（クッション値・含水率）
 
-`/run` および `scheduled` 投入時に（本番の Cron は停止）、JRA 公式の馬場情報を取得して**対象場の分だけを `remarks`（備考欄）に追記**します。設定は不要（常時有効）で、予測ロジック自体は Dify 側なので、備考欄のテキストを読んで予想に反映してください。取得に失敗しても投入は止めず、その回だけ馬場情報なしで送ります。
+`/run` および Cron 投入時に、JRA 公式の馬場情報を取得して**対象場の分だけを `remarks`（備考欄）に追記**します。設定は不要（常時有効）で、予測ロジック自体は Dify 側なので、備考欄のテキストを読んで予想に反映してください。取得に失敗しても投入は止めず、その回だけ馬場情報なしで送ります。
 
 `remarks` の例:
 
@@ -262,7 +259,7 @@ curl -H "Authorization: Bearer $PREDICT_SECRET" \
 
 ### 対象計測の選び方（タイミング）
 
-以前の Cron は前日 17:00 に翌日分を投入していました。その Cron は停止し、定期予想は [jra-bashira-pipeline](https://github.com/hidesuke/jra-bashira-pipeline) です。`scheduled` や `/run` が開催日前に走ると、クッション値は開催当日の朝に計測・公開されるため、その時点ではその日の実測はまだ存在しません。そこで**対象日と同月日の計測があればそれを、無ければその時点の最新（直近）計測**を付与します。
+Cron は前日 16:45 に翌日分を投入します。クッション値は開催当日の朝に計測・公開されるため、16:45 時点ではその日の実測はまだ存在しません。そこで**対象日と同月日の計測があればそれを、無ければその時点の最新（直近）計測**を付与します。つまり 16:45 投入時は「その時点で公開されている最新の馬場データ」が入ります。
 
 ### AI 向けエンドポイント `GET /baba/latest`
 
@@ -339,7 +336,7 @@ curl "https://jra-dify-pipeline.hdsk.workers.dev/baba?date=2026-09-13"
 
 GitHub の `main` にマージすると、Cloudflare が Worker を自動デプロイします（Workers Builds / Git 連携）。普段の反映は PR を `main` に入れるだけで十分です。`npm run deploy` は手元から出すときの手動手段です。シークレット（`wrangler secret put`）はデプロイでは上書きされないので、キーの追加・変更だけ別途必要です。
 
-初回セットアップの手順は公式の [Queues 入門](https://developers.cloudflare.com/queues/get-started/)、[Secrets](https://developers.cloudflare.com/workers/configuration/secrets/)、[Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/) に沿っています。`wrangler.jsonc` 側の producer / consumer 定義は済みです。Cron は `triggers.crons: []` で停止しています。空配列を残さないと、デプロイしても本番トリガーは消えません。
+初回セットアップの手順は公式の [Queues 入門](https://developers.cloudflare.com/queues/get-started/)、[Secrets](https://developers.cloudflare.com/workers/configuration/secrets/)、[Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/) に沿っています。`wrangler.jsonc` 側の producer / consumer / Cron 定義は済みです。
 
 ### 1. ログイン
 
@@ -388,7 +385,7 @@ npx wrangler deploy --secrets-file .env.production
 npm run deploy
 ```
 
-成功すると `*.workers.dev` URL が表示されます。`triggers.crons` が `[]` なので、デプロイログに `schedule: 0 8 * * FRI` / `0 8 * * SAT` は出ません。空の `crons` をデプロイすると本番の Cron Triggers が外れます。反映まで数分かかることがあります。
+成功すると `*.workers.dev` URL が表示されます。デプロイログに `schedule: 45 7 * * FRI` / `45 7 * * SAT` が出ていれば Cron は有効です。Cron の変更は反映まで数分かかることがあります。
 
 ### 5. 動作確認
 
@@ -397,16 +394,16 @@ npm run deploy
 ダッシュボードの設定確認:
 
 - Workers & Pages → `jra-dify-pipeline`
-- Settings → Triggers → Cron Triggers（`[]` をデプロイしたあとは空。Worker と `/baba/latest` は残す）
+- Settings → Triggers → Cron Triggers
 - Workers → Queues → `jra-race-queue`
 
 ## ログの見方
 
-この Worker が出す主なメッセージです。本番 Cron は停止しているので、scheduled のログはローカルなどで発火したときだけ出ます。
+この Worker が出す主なメッセージ:
 
 | タイミング | レベル | 内容 |
 | --- | --- | --- |
-| scheduled 発火 | `console.log` | `Cron <式> target=YYYY-MM-DD`（発火した式と JST 翌日）。本番 Cron は停止 |
+| Cron 発火 | `console.log` | `Cron 45 7 * * FRI target=YYYY-MM-DD`（式と JST 翌日。土曜は `45 7 * * SAT`） |
 | Cron で開催なし | `console.log` | `No race scheduled for tomorrow: YYYY-MM-DD` |
 | 1R URL 検証 | `console.log` / `console.error` | `1R verify YYYY-MM-DD 場:06 ok\|error_page\|fetch_failed ...` |
 | メール通知 | `console.log` | `Notifying race URL failures for YYYY-MM-DD: N venue(s)` |
@@ -439,7 +436,7 @@ npx wrangler tail --status error
 3. **Observability** で過去ログの検索（`wrangler.jsonc` で有効化済み）
 4. **Issues（問題検出）** で例外・5xx・`console.error` のグルーピング（`observability.issues.enabled` 済み。有効化後の新規障害のみ）
 
-本番 Cron は停止しています。過去の実行履歴は Worker の **Settings → Triggers** 付近の Cron Events（直近 100 件程度）に残っていることがあります。
+Cron の実行履歴は Worker の **Settings → Triggers** 付近の Cron Events（直近 100 件程度）でも見られます。
 
 ## 手動実行
 
@@ -574,7 +571,7 @@ curl -H "Authorization: Bearer local-dev-secret" \
   "http://localhost:8787/seed"
 ```
 
-本番の Cron は `crons: []` で停止しています。ローカルで `scheduled` ハンドラだけを試す場合は、公式の [ローカル Cron テスト](https://developers.cloudflare.com/workers/configuration/cron-triggers/#test-cron-triggers-locally) どおり次を叩きます。対象日は JST の翌日です。
+ローカルで Cron 相当（`scheduled`）を試す場合は、公式の [ローカル Cron テスト](https://developers.cloudflare.com/workers/configuration/cron-triggers/#test-cron-triggers-locally) どおり次を叩きます。対象日は JST の翌日です。金・土 16:45 JST の発火でも同じです。
 
 ```bash
 curl "http://localhost:8787/cdn-cgi/local/scheduled"
