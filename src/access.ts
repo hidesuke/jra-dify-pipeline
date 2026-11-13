@@ -112,7 +112,7 @@ export function predictAuthConfigured(env: PredictAuthEnv): boolean {
 }
 
 /**
- * `/run`・`/kick`・`/verify`・`/seed` を通してよければ null。拒否なら Response。
+ * `/run`・`/kick`・`/verify`・`/seed`・`/concurrency` を通してよければ null。拒否なら Response。
  * Access 未設定のまま公開しない。
  */
 export async function authorizePredict(

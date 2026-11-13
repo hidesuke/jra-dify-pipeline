@@ -1,6 +1,6 @@
 # jra-dify-pipeline
 
-JRA の開催日ごとに公式レースページ URL を組み立て、Cloudflare Queues 経由で [Dify](https://dify.ai/) ワークフローを 1 レースずつ起動する Cloudflare Worker です。
+JRA の開催日ごとに公式レースページ URL を組み立て、Cloudflare Queues 経由で [Dify](https://dify.ai/) ワークフローを起動する Cloudflare Worker です。Dify へ同時に投げるレース数は既定 3 で、デプロイなしに変えられます。
 
 予測ロジック自体はこのリポジトリにはありません。出馬表の取得や予想は `DIFY_API_URL` 先のワークフロー側で行います。
 
@@ -12,8 +12,9 @@ JRA の開催日ごとに公式レースページ URL を組み立て、Cloudfla
 
 ```
 Cron（金・土 16:45 JST） ─┐
-GET|POST /run（認証必須） ─┴─→ KV の seed で URL 生成 → 各場1R検証 → jra-race-queue → Dify
+GET|POST /run（認証必須） ─┴─→ KV の seed で URL 生成 → 各場1R検証 → jra-race-queue → Dify（同時 N 件、既定 3）
 GET|POST /kick（フォーム）─┘                         └─ エラーページならメール（/seed リンク）＋その場をスキップ
+GET|POST|PUT /concurrency（認証必須） → KV の N を読む／書く（次のバッチから。デプロイ不要）
 
 GET /            → 馬柱 URL の一覧のみ（キュー投入も予想もしない）
 GET /kick        → 今週の開催から日付・場・レースを選んで投入する画面（Access 必須・スマホ向け）
@@ -33,7 +34,8 @@ GET /seed        → 失敗した場の正しい 1R URL を入れて、その場
 | `GET /baba/latest` | 各場の**最新計測だけ**を JSON で返す。認証なし。Dify の HTTP リクエストツールなど AI から読む用。履歴やパース生データは含まない |
 | `GET /baba` | 馬場データの確認用ダンプ（全計測）。認証なし。キュー投入なし |
 | `GET /robots.txt` | クローラ向けに `Disallow: /`（主要 AI ボット UA も明示）。索引・学習クローラ向けの最低限対策 |
-| `queue` | Queue consumer。1 件ずつ Dify へ streaming POST。`workflow_finished`(succeeded) で成功。タイムアウト／切断は ack（リトライなし）。他エラーは最大 3 回リトライし、尽きるとメール通知 |
+| `GET /concurrency` または `POST /concurrency`・`PUT /concurrency` | Dify へ同時に投げるレース数 N を読む／書く。認証は `/run` と同じ。未設定なら 3。1〜10 の整数。保存先は KV。次の Queue バッチから反映され、デプロイは不要 |
+| `queue` | Queue consumer。バッチの先頭 N 件だけ Dify へ並列に streaming POST する。余りは試行回数を増やさずにキューへ戻す。`workflow_finished`(succeeded) で成功。タイムアウト／切断は ack（リトライなし）。他エラーは最大 3 回リトライし、尽きるとメール通知 |
 
 公開応答には `X-Robots-Tag: noindex, nofollow, noarchive` を付けます。HTML には同内容の `<meta name="robots">` もあります。`/baba/latest` など **意図した API 呼び出しは塞ぎません**（robots を無視しない正規クローラ向け）。
 
@@ -82,7 +84,7 @@ npm install
 | `npm run dev` | ローカル開発（`wrangler dev`） |
 | `npm run deploy` | 手元から Cloudflare へデプロイ（普段は `main` へのマージで自動） |
 | `npm run tail` | 本番ログを購読 |
-| `npm test` | 1R 検証、シード逆算、scheduled の翌日投入などのローカルテスト |
+| `npm test` | 1R 検証、シード逆算、scheduled の翌日投入、Dify 同時実行数などのローカルテスト |
 | `npm run cf-typegen` | Worker の型定義を生成 |
 
 その他の Wrangler サブコマンド（login / queues / secret など）は `npx wrangler` で実行します。
@@ -95,16 +97,16 @@ npm install
 | `DIFY_API_URL` | はい | Workflow 実行エンドポイント。`https://api.dify.ai/v1/workflows/run` |
 | `PREFIX_CODE` | いいえ | JRA CNAME の接頭辞。未設定時は `pw01dde01` |
 | `PUBLIC_BASE_URL` | いいえ | 失敗メールに載せる Worker の origin。既定は `https://jra-dify-pipeline.hdsk.workers.dev` |
-| `CF_ACCESS_TEAM_DOMAIN` | `/run`・`/kick`・`/seed` 用 | Zero Trust のチーム URL。例: `https://<team>.cloudflareaccess.com` |
-| `CF_ACCESS_AUD` | `/run`・`/kick`・`/seed` 用 | Access アプリケーションの Audience（AUD）タグ。パスごとにアプリが分かれる場合はカンマ区切り |
+| `CF_ACCESS_TEAM_DOMAIN` | `/run`・`/kick`・`/seed`・`/concurrency` 用 | Zero Trust のチーム URL。例: `https://<team>.cloudflareaccess.com` |
+| `CF_ACCESS_AUD` | `/run`・`/kick`・`/seed`・`/concurrency` 用 | Access アプリケーションの Audience（AUD）タグ。パスごとにアプリが分かれる場合はカンマ区切り |
 | `CF_ACCESS_ALLOWED_EMAIL` | いいえ | 許可するメール。未設定なら Access を通ったユーザーなら可。通知先のフォールバックにも使う |
-| `PREDICT_SECRET` | `/run`・`/kick`・`/seed` 用（代替） | 自分で決めた共有秘密。Cloudflare からは発行されない。CLI では `Authorization: Bearer` に付ける |
+| `PREDICT_SECRET` | `/run`・`/kick`・`/seed`・`/concurrency` 用（代替） | 自分で決めた共有秘密。Cloudflare からは発行されない。CLI では `Authorization: Bearer` に付ける |
 | `NOTIFY_EMAIL` | 通知用 | 馬柱 URL エラーの通知先。**Email Routing で Verify 済みの Destination address**。`wrangler.jsonc` の `vars` に定義（ダッシュボードと同期） |
 | `NOTIFY_FROM` | いいえ | 送信元。`koumeinowana.info` 上のアドレス。`wrangler.jsonc` の vars 既定は `noreply@koumeinowana.info` |
 
-`/run`・`/kick`・`/verify`・`/seed` は `CF_ACCESS_*` か `PREDICT_SECRET` の少なくとも一方が無いと `503` です。インデックス `/` と `/baba`・`/baba/latest` は認証しません。
+`/run`・`/kick`・`/verify`・`/seed`・`/concurrency` は `CF_ACCESS_*` か `PREDICT_SECRET` の少なくとも一方が無いと `503` です。インデックス `/` と `/baba`・`/baba/latest` は認証しません。
 
-チェックサムの加算定数（seed）は Workers KV（バインディング `CHECKSUM_SEED`）に保持します。未設定時の初期値は `0x4B`（2026 年の定数）です。`formulaVersion` が 2 でない古いレコードは、共通キーでも場ごとのキーでも無視します。場・年・回次の上書き `checksum_seed:{場コード}:{年}:{回次}`（例: `checksum_seed:04:2026:04`）がある開催だけ、共通キーの代わりにその値を使います。上書きが無い間の URL は、共通キーだけのときと同じです。`/seed` は共通キーを上書きしません。名前空間の表示名が違っていても、`wrangler.jsonc` の `binding` が `CHECKSUM_SEED` なら Worker から使えます。
+チェックサムの加算定数（seed）は Workers KV（バインディング `CHECKSUM_SEED`）に保持します。同じ名前空間のキー `dify_concurrency` に、Dify へ同時投入するレース数 N も置きます（未設定なら 3。変更は `/concurrency`）。チェックサム seed の未設定時の初期値は `0x4B`（2026 年の定数）です。`formulaVersion` が 2 でない古いレコードは、共通キーでも場ごとのキーでも無視します。場・年・回次の上書き `checksum_seed:{場コード}:{年}:{回次}`（例: `checksum_seed:04:2026:04`）がある開催だけ、共通キーの代わりにその値を使います。上書きが無い間の URL は、共通キーだけのときと同じです。`/seed` は共通キーを上書きしません。名前空間の表示名が違っていても、`wrangler.jsonc` の `binding` が `CHECKSUM_SEED` なら Worker から使えます。
 
 メール送信は Cloudflare Email Service の `send_email` バインディング（`EMAIL`）を使います。Resend 等の外部 API キーは不要です。検証済み Destination 宛てのみ（自分宛通知）なので Workers Free でも利用できます。
 
@@ -141,7 +143,7 @@ Queue consumer が `DIFY_API_URL` へ `POST` する JSON:
 | `response_mode` | 文字列 | `streaming`（SSE）。`workflow_finished` まで読む |
 | `user` | 文字列 | Dify API 必須の実行ユーザー識別子 |
 
-1 開催日 × 1 場につき 12 通（1R〜12R）送ります。Queue consumer の判定:
+1 開催日 × 1 場につき 12 通（1R〜12R）送ります。実際に Dify へ送ったメッセージの判定は次のとおりです。同時実行数 N を超えた分は Dify を呼ばず、試行回数を増やさずにキューへ戻します（詳細は「同時実行数」）。
 
 | 結果 | 動作 |
 | --- | --- |
@@ -319,7 +321,7 @@ curl "https://jra-dify-pipeline.hdsk.workers.dev/baba/latest?format=text"
 }
 ```
 
-Cloudflare Access は `/run`・`/kick`・`/seed` だけに付けてください。`/baba/latest` まで保護すると AI から認証なしで読めなくなります。
+Cloudflare Access は `/run`・`/kick`・`/seed`・`/concurrency` だけに付けてください。`/baba/latest` まで保護すると AI から認証なしで読めなくなります。
 
 ### 確認用エンドポイント `GET /baba`
 
@@ -409,7 +411,9 @@ npm run deploy
 | メール通知 | `console.log` | `Notifying race URL failures for YYYY-MM-DD: N venue(s)` |
 | キュー投入成功（Cron） | `console.log` | `Successfully enqueued N races for YYYY-MM-DD (seeds=04=0x4B(default),05=0x4B(default))`。場ごとの上書きがあるときは `04=0x10` のように source なし |
 | シード更新後の再投入 | `console.log` | `Seed re-enqueue YYYY-MM-DD: N races, stillFailed=0 (04=0x10,05=0x4B(global))` |
-| Dify 呼び出し直前 | `console.log` | `Executing Dify API (streaming, attempt=N): YYYY-MM-DD 場:06 1R <url>` |
+| Queue バッチ開始 | `console.log` | `Queue batch size=N concurrency=3 (kv\|default) active=3 deferred=7` |
+| 同時実行の余りを戻した | `console.log` | `Requeued N races above concurrency: 06:4R,...` |
+| Dify 呼び出し直前 | `console.log` | `Executing Dify API (streaming, attempt=N): YYYY-MM-DD 場:06 1R <url>`。`attempt` は延期をまたいだ試行回数 |
 | Dify 成功 | `console.log` | `Dify succeeded: ...` |
 | Dify タイムアウト／切断 | `console.warn` | `Dify timeout\|disconnect (ack, no retry): ...` |
 | Dify リトライ対象失敗 | `console.error` | `Dify retryable failure: ...` |
@@ -460,13 +464,13 @@ Cron の実行履歴は Worker の **Settings → Triggers** 付近の Cron Even
 
 ### Cloudflare Access（ブラウザ・無料枠）
 
-Zero Trust の **Free**（50 ユーザーまで）で、ホストの **パス `/run`・`/kick`・`/seed`** を保護できます。`workers.dev` も対象にできます。Worker 全体の Access は付けないでください。`/` や `/baba/latest` までログイン必須になります。
+Zero Trust の **Free**（50 ユーザーまで）で、ホストの **パス `/run`・`/kick`・`/seed`・`/concurrency`** を保護できます。`workers.dev` も対象にできます。Worker 全体の Access は付けないでください。`/` や `/baba/latest` までログイン必須になります。
 
-`/run` 用のアプリに加え、同じポリシーで **パス `kick`** と **パス `seed`** のセルフホストアプリを追加します（AUD が別になるため）。`/kick` をまだ足していない間は、ブラウザで `/run` を開けば同じフォームが出ます。
+`/run` 用のアプリに加え、同じポリシーで **パス `kick`** と **パス `seed`** のセルフホストアプリを追加します（AUD が別になるため）。`/kick` をまだ足していない間は、ブラウザで `/run` を開けば同じフォームが出ます。`/concurrency` を Service Token だけで叩くときは、パス `concurrency` のアプリも足します。curl が `Authorization: Bearer` に `PREDICT_SECRET` を付ける場合は、そのアプリが無くても Worker が受け付けます。
 
 1. [Zero Trust](https://one.dash.cloudflare.com/) → Access → Applications → アプリケーションを追加
 2. **セルフホストとプライベート** → **パブリックDNS**（プライベート宛先や Workers 全体保護は選ばない）
-3. サブドメイン: `jra-dify-pipeline`、ドメイン: `hdsk.workers.dev`、パス: `run`（同様にパス `kick` と `seed`）
+3. サブドメイン: `jra-dify-pipeline`、ドメイン: `hdsk.workers.dev`、パス: `run`（同様にパス `kick` と `seed`。Service Token で `/concurrency` を使うならパス `concurrency` も）
 4. ポリシー: Action Allow、Include → **Emails** に自分のメール
 5. App Launcher / Cloudflare One Client 認証 / クライアントレスアクセスはオフ
 6. 発行された **Application Audience (AUD) Tag** と、Settings の **Team domain**（`https://<team>.cloudflareaccess.com`）を控える
@@ -475,7 +479,7 @@ Zero Trust の **Free**（50 ユーザーまで）で、ホストの **パス `/
 ```bash
 npx wrangler secret put CF_ACCESS_TEAM_DOMAIN
 npx wrangler secret put CF_ACCESS_AUD
-# /run と /kick と /seed で AUD が違う場合はカンマ区切り: <run-aud>,<kick-aud>,<seed-aud>
+# パスごとに AUD が違う場合はカンマ区切り: <run-aud>,<kick-aud>,<seed-aud>,<concurrency-aud>
 npx wrangler secret put CF_ACCESS_ALLOWED_EMAIL
 ```
 
@@ -569,6 +573,11 @@ curl -H "Authorization: Bearer local-dev-secret" -H "Accept: text/html" \
   "http://localhost:8787/kick"
 curl -H "Authorization: Bearer local-dev-secret" \
   "http://localhost:8787/seed"
+curl -H "Authorization: Bearer local-dev-secret" \
+  "http://localhost:8787/concurrency"
+curl -H "Authorization: Bearer local-dev-secret" \
+  -d "concurrency=4" \
+  "http://localhost:8787/concurrency"
 ```
 
 ローカルで Cron 相当（`scheduled`）を試す場合は、公式の [ローカル Cron テスト](https://developers.cloudflare.com/workers/configuration/cron-triggers/#test-cron-triggers-locally) どおり次を叩きます。対象日は JST の翌日です。金・土 16:45 JST の発火でも同じです。
@@ -579,16 +588,61 @@ curl "http://localhost:8787/cdn-cgi/local/scheduled"
 
 `wrangler dev` 実行中にターミナルで `s` を押しても scheduled を発火できます。
 
-## キュー設定（参考）
+## 同時実行数
+
+Dify へ同時に投げるレース数 N は、Worker が各 Queue バッチの先頭で KV から読みます。キーは `CHECKSUM_SEED` 名前空間の `dify_concurrency` です。未設定・壊れた値・読み取り失敗のときは **3** です。1〜10 の整数だけ保存できます。10 は `wrangler.jsonc` の `max_batch_size` と同じ上限です。これより大きくするには、`src/concurrency.ts` の `DIFY_CONCURRENCY_MAX` と `max_batch_size` を揃えてデプロイします。
+
+N の変更はデプロイ不要です。次のバッチが KV を読み直します。isolate にはキャッシュしません。KV の伝播で、書いた直後のバッチが古い値を見ることがあります（おおよそ 60 秒以内に揃います）。
 
 `wrangler.jsonc` の consumer:
 
-- `max_batch_size`: 1（1 メッセージずつ Dify へ）
+- `max_batch_size`: 10（1 バッチで受け取れる上限。N の上限と同じ）
 - `max_batch_timeout`: 5 秒
-- `max_retries`: 3
-- `max_concurrency`: 2（Dify 側の負荷に合わせて調整）
+- `max_retries`: 3（Dify の失敗リトライ。同時実行のための戻しでは消費しない）
+- `max_concurrency`: 1（バッチは同時に 1 本だけ。N 並列はバッチの中で行う）
+
+`max_concurrency` を 1 にしてあるので、別のバッチが同じ時間に Dify を呼びません。バッチの先頭 N 件だけを並列に送り、それより後ろは同じキューへ新しいメッセージとして戻してから ack します。`retry()` で戻すと `attempts` が増え、Dify を呼ぶ前にリトライ上限へ届くため使いません。戻したメッセージには `priorAttempts` が付き、失敗判定の試行回数は延期の前から続きます。延期が一度も無いメッセージは、これまでどおりキューの `attempts` だけを見ます。
+
+処理したメッセージの成功・タイムアウト／切断・失敗リトライ・最終回のメールは従来どおりです。最終回は試行回数 4（初回 + リトライ 3 回）でメールして ack します。
 
 Dead Letter Queue は未設定です。リトライ対象のエラーが上限を超えた場合はメール通知のうえ ack します（タイムアウト／切断は最初から ack）。
+
+### `GET|POST|PUT /concurrency`
+
+認証は `/run` と同じです。`Authorization: Bearer` に `PREDICT_SECRET` を付けるか、Cloudflare Access（ブラウザのログイン、または Service Token）を通します。Service Token を使う場合は、Access のパス `concurrency` を追加し、AUD が既存と違うときは `CF_ACCESS_AUD` にカンマ区切りで足します。秘密の値自体はこのリポジトリに書きません。
+
+| メソッド | 動作 |
+| --- | --- |
+| `GET` | 現在の N。クエリは無視する（読むだけでは変わらない） |
+| `POST` または `PUT` | N を保存する。クエリ `concurrency`、フォーム `concurrency=N`、JSON `{"concurrency":N}`、本文が整数だけ、のどれか |
+
+成功時は JSON です。`source` は KV に値があるとき `kv`、未設定のとき `default` です。
+
+```json
+{"concurrency":3,"source":"default","min":1,"max":10,"default":3,"updatedAt":null}
+```
+
+範囲外・欠落は `400`。KV が無くて書けないときは `503`。認証が無いときは `/run` と同じ `401`、認証設定自体が無いときは `503` です。
+
+```bash
+# 現在値（未設定なら 3）
+curl -H "Authorization: Bearer $PREDICT_SECRET" \
+  "https://jra-dify-pipeline.hdsk.workers.dev/concurrency"
+
+# 4 に変える。次のバッチから反映
+curl -H "Authorization: Bearer $PREDICT_SECRET" \
+  -d "concurrency=4" \
+  "https://jra-dify-pipeline.hdsk.workers.dev/concurrency"
+
+# JSON でも同じ
+curl -H "Authorization: Bearer $PREDICT_SECRET" \
+  -X PUT \
+  -H "Content-Type: application/json" \
+  -d '{"concurrency":3}' \
+  "https://jra-dify-pipeline.hdsk.workers.dev/concurrency"
+```
+
+ログでは `Queue batch size=... concurrency=4 (kv)` と、Dify を呼んだ件数 `active`、戻した件数 `deferred` が出ます。`Executing Dify API` が同時に N 本を超えて並ばないことをここで確認できます。
 
 投入済みをまとめて捨てる場合は、先に配信を止めてから purge します。1 件ずつの取り消しはできません。処理中のメッセージは残り得ます。
 
