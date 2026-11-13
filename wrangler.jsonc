@@ -48,10 +48,13 @@
     "consumers": [
       {
         "queue": "jra-race-queue",
-        "max_batch_size": 1,        // 1メッセージずつ処理
+        // 同時実行数 N の上限。src/concurrency.ts の DIFY_CONCURRENCY_MAX と揃える。
+        // 実際の N は KV（未設定なら 3）。この値を超える N はエンドポイントが拒否する。
+        "max_batch_size": 10,
         "max_batch_timeout": 5,
-        "max_retries": 3,           // 失敗時は3回まで自動リトライ
-        "max_concurrency": 2        // 同時実行数（Difyの許容負荷に合わせて1〜3程度）
+        "max_retries": 3,           // 失敗時は3回まで自動リトライ（延期の再投入では消費しない）
+        // バッチは同時に 1 本だけ。N 並列はバッチの中で行うので、デプロイなしで N を変えられる。
+        "max_concurrency": 1
       }
     ]
   }

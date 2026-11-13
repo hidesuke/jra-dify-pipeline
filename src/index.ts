@@ -32,6 +32,13 @@ import {
   shouldRetryOutcome,
 } from "./dify.ts";
 import { robotsTxtResponse, withNoindex } from "./crawlGuard.ts";
+import {
+  effectiveAttempts,
+  handleConcurrencyRequest,
+  readConcurrency,
+  splitForConcurrency,
+  withCarriedAttempts,
+} from "./concurrency.ts";
 
 export type { ScheduleItem };
 
@@ -76,6 +83,12 @@ export interface RaceMessage {
   raceNo: number;
   raceUrl: string;
   baba?: BabaAttachment;
+  /**
+   * 同時実行の枠が足りずキューへ戻したとき、それまでの試行回数。
+   * 戻したメッセージは attempts が 1 から再開するため、失敗判定は priorAttempts + attempts - 1。
+   * Cron /run /seed は付けない。
+   */
+  priorAttempts?: number;
 }
 
 type RaceRow = RaceUrlRow;
@@ -114,6 +127,135 @@ async function sendRaceBatch(env: Env, messages: MessageSendRequest<RaceMessage>
   for (let i = 0; i < messages.length; i += chunkSize) {
     await env.RACE_QUEUE.sendBatch(messages.slice(i, i + chunkSize));
   }
+}
+
+function raceLabel(body: RaceMessage): string {
+  return `${body.targetDate} 場:${body.venueCode} ${body.raceNo}R`;
+}
+
+/** リトライ対象の失敗。最終回はメールして ack。それ以外は retry()（attempts が増える）。 */
+async function finishRetryable(
+  msg: Message<RaceMessage>,
+  env: Env,
+  outcome: { attempts: number; detail: string },
+  settle: { ack: () => void; retry: () => void }
+): Promise<void> {
+  const { targetDate, venueCode, raceNo, raceUrl } = msg.body;
+  if (isFinalQueueAttempt(outcome.attempts, DIFY_QUEUE_MAX_RETRIES)) {
+    await notifyDifyFailure(env, {
+      targetDate,
+      venueCode,
+      raceNo,
+      raceUrl,
+      attempts: outcome.attempts,
+      detail: outcome.detail,
+    });
+    settle.ack();
+    return;
+  }
+  settle.retry();
+}
+
+/**
+ * 1 レースを Dify へ送る。ack / retry は必ず一度だけ。
+ * 予期しない例外もその 1 件だけをリトライ対象にし、バッチの残りを巻き込まない。
+ */
+async function processRaceMessage(msg: Message<RaceMessage>, env: Env): Promise<void> {
+  let settled = false;
+  const ack = () => {
+    if (settled) return;
+    settled = true;
+    msg.ack();
+  };
+  const retry = () => {
+    if (settled) return;
+    settled = true;
+    msg.retry();
+  };
+  let attempts = 1;
+  let remarks = "(unknown race)";
+
+  try {
+    attempts = effectiveAttempts(msg.attempts, msg.body?.priorAttempts);
+    const { raceUrl, baba } = msg.body;
+    remarks = `${raceLabel(msg.body)}${baba ? ` ｜ ${baba.summary}` : ""}`;
+    const query = raceLabel(msg.body);
+    console.log(`Executing Dify API (streaming, attempt=${attempts}): ${remarks} ${raceUrl}`);
+    const outcome = await runDifyWorkflowStreaming({
+      apiUrl: env.DIFY_API_URL,
+      apiKey: env.DIFY_API_KEY,
+      raceUrl,
+      remarks,
+      query,
+    });
+
+    if (outcome.kind === "success") {
+      console.log(
+        `Dify succeeded: ${remarks}${outcome.workflowRunId ? ` run=${outcome.workflowRunId}` : ""}`
+      );
+      ack();
+      return;
+    }
+
+    if (!shouldRetryOutcome(outcome)) {
+      // timeout / disconnect → 正常終了扱い（再実行しない）
+      console.warn(`Dify ${outcome.kind} (ack, no retry): ${remarks} ${outcome.detail}`);
+      ack();
+      return;
+    }
+
+    console.error(`Dify retryable failure: ${remarks} ${outcome.detail}`);
+    await finishRetryable(msg, env, { attempts, detail: outcome.detail }, { ack, retry });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error(`Dify consumer threw: ${remarks} ${detail}`);
+    if (settled) return;
+    try {
+      await finishRetryable(msg, env, { attempts, detail }, { ack, retry });
+    } catch (settleError) {
+      console.error(`Failed to settle race ${remarks}:`, settleError);
+      retry();
+    }
+  }
+}
+
+/**
+ * N を超えたレースを同じキューへ戻す。retry() は使わないので max_retries は減らない。
+ * 戻したあとに ack する。sendBatch が失敗した分だけ、通常の失敗リトライに乗せる。
+ */
+async function deferExcessRaces(env: Env, messages: readonly Message<RaceMessage>[]): Promise<void> {
+  const chunkSize = 100;
+  for (let i = 0; i < messages.length; i += chunkSize) {
+    const slice = messages.slice(i, i + chunkSize);
+    try {
+      await env.RACE_QUEUE.sendBatch(
+        slice.map((msg) => ({
+          body: withCarriedAttempts(msg.body, msg.attempts),
+        }))
+      );
+    } catch (error) {
+      console.error(`Failed to requeue ${slice.length} races above concurrency:`, error);
+      const detail = error instanceof Error ? error.message : String(error);
+      for (const msg of messages.slice(i)) {
+        await finishRetryable(
+          msg,
+          env,
+          {
+            attempts: effectiveAttempts(msg.attempts, msg.body.priorAttempts),
+            detail: `concurrency requeue failed: ${detail}`,
+          },
+          { ack: () => msg.ack(), retry: () => msg.retry() }
+        );
+      }
+      return;
+    }
+    for (const msg of slice) msg.ack();
+  }
+  console.log(
+    `Requeued ${messages.length} races above concurrency: ${messages
+      .map((m) => `${m.body.venueCode}:${m.body.raceNo}R`)
+      .join(",")}`
+  );
 }
 
 // ---------------------------------------------------------
@@ -163,54 +305,24 @@ export default {
     );
   },
 
-  // 2. Queue Consumer: Dify API を streaming でキック
+  // 2. Queue Consumer: Dify API を streaming でキック。
+  //    同時に投げるのは N 件（KV、未設定なら 3）。バッチは max_concurrency=1 で 1 本だけ。
   //    成功 = workflow_finished(succeeded)。タイムアウト／切断は ack。他エラーは最大 3 回リトライ後にメール。
   async queue(batch: MessageBatch<RaceMessage>, env: Env): Promise<void> {
-    for (const msg of batch.messages) {
-      const { targetDate, venueCode, raceNo, raceUrl, baba } = msg.body;
-      // 馬場情報がある場合は remarks（備考欄）に追記する。
-      const remarks = `${targetDate} 場:${venueCode} ${raceNo}R${baba ? ` ｜ ${baba.summary}` : ""}`;
-      const query = `${targetDate} 場:${venueCode} ${raceNo}R`;
-      console.log(`Executing Dify API (streaming, attempt=${msg.attempts}): ${remarks} ${raceUrl}`);
+    const setting = await readConcurrency(env.CHECKSUM_SEED);
+    const { active, deferred } = splitForConcurrency(batch.messages, setting.concurrency);
+    console.log(
+      `Queue batch size=${batch.messages.length} concurrency=${setting.concurrency} (${setting.source}) active=${active.length} deferred=${deferred.length}`
+    );
 
-      const outcome = await runDifyWorkflowStreaming({
-        apiUrl: env.DIFY_API_URL,
-        apiKey: env.DIFY_API_KEY,
-        raceUrl,
-        remarks,
-        query,
-      });
-
-      if (outcome.kind === "success") {
-        console.log(
-          `Dify succeeded: ${remarks}${outcome.workflowRunId ? ` run=${outcome.workflowRunId}` : ""}`
-        );
-        msg.ack();
-        continue;
-      }
-
-      if (!shouldRetryOutcome(outcome)) {
-        // timeout / disconnect → 正常終了扱い（再実行しない）
-        console.warn(`Dify ${outcome.kind} (ack, no retry): ${remarks} ${outcome.detail}`);
-        msg.ack();
-        continue;
-      }
-
-      console.error(`Dify retryable failure: ${remarks} ${outcome.detail}`);
-      if (isFinalQueueAttempt(msg.attempts, DIFY_QUEUE_MAX_RETRIES)) {
-        await notifyDifyFailure(env, {
-          targetDate,
-          venueCode,
-          raceNo,
-          raceUrl,
-          attempts: msg.attempts,
-          detail: outcome.detail,
-        });
-        msg.ack();
-        continue;
-      }
-      msg.retry();
+    // Dify より先に余りを戻す。処理中に Worker が落ちても、戻した分の試行回数は増えない。
+    // max_concurrency が 1 なので、戻したメッセージは次のバッチまで届かない。
+    if (deferred.length > 0) {
+      await deferExcessRaces(env, deferred);
     }
+
+    // 1 件の失敗でバッチ全体を落とさない。落とすと未 ack の分まで attempts が増える。
+    await Promise.allSettled(active.map((msg) => processRaceMessage(msg, env)));
   },
 
   // 3. GET / は馬柱 URL の一覧のみ。予想は GET|POST /run（認証必須）。
@@ -269,6 +381,12 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
     return handleSeedRequest(req, env, (updated, pending) =>
       enqueueAfterSeedUpdate(env, updated, pending)
     );
+  }
+
+  if (path === "/concurrency") {
+    const denied = await authorizePredict(req, env, ctx);
+    if (denied) return denied;
+    return handleConcurrencyRequest(req, env.CHECKSUM_SEED);
   }
 
   if (path === "/baba/latest") {
