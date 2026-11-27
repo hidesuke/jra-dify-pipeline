@@ -348,7 +348,7 @@ curl "https://jra-dify-pipeline.hdsk.workers.dev/baba?date=2026-09-13"
 
 ## Cloudflare へのデプロイ
 
-GitHub の `main` にマージすると、Cloudflare が Workers Builds でデプロイします。馬場取得は別 Worker `jra-baba-fetcher` です。既定の Deploy command `npx wrangler deploy` のままでも、`wrangler.jsonc` の `build.command` が本体のアップロード前に fetcher を用意します（`WORKERS_CI=1` のときだけ。ローカルの `wrangler dev` では動きません）。`main` では毎回 fetcher を更新します。それ以外のブランチは、fetcher がまだ無いときだけ作り、PR のたびに本番の fetcher を上書きしません。手元から出すときは `npm run deploy` です。シークレット（`wrangler secret put`）はデプロイでは上書きされないので、キーの追加・変更だけ別途必要です。fetcher にシークレットはありません。
+GitHub の `main` にマージすると、Cloudflare が Workers Builds でデプロイします。馬場取得は別 Worker `jra-baba-fetcher` です。`main` のビルドでは `wrangler.jsonc` の `build.command` が本体のアップロード前に fetcher をデプロイします。Workers Builds は Worker 名を本体へ上書きするので、その子プロセスでは `WRANGLER_CI_OVERRIDE_NAME` などを外します。`main` 以外のブランチは本番へ何も出しません。PR のコマンドは `npx wrangler versions upload` で、fetcher がまだ無い Service Binding のため失敗します。これはマージ前に本番を変えないための失敗です。ローカルの `wrangler dev` でも fetcher はデプロイしません。手元から出すときは `npm run deploy` です。シークレット（`wrangler secret put`）はデプロイでは上書きされないので、キーの追加・変更だけ別途必要です。fetcher にシークレットはありません。
 
 初回セットアップの手順は公式の [Queues 入門](https://developers.cloudflare.com/queues/get-started/)、[Secrets](https://developers.cloudflare.com/workers/configuration/secrets/)、[Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/) に沿っています。`wrangler.jsonc` 側の producer / consumer / Cron 定義は済みです。
 

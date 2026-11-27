@@ -22,7 +22,7 @@ import {
 } from "../src/babaFetcher.ts";
 import worker from "../src/index.ts";
 import { spawnSync } from "node:child_process";
-import { shouldDeployFetcher } from "./ensure-baba-fetcher.mjs";
+import { envForFetcherDeploy, shouldDeployFetcher } from "./ensure-baba-fetcher.mjs";
 
 let failed = 0;
 function assert(cond, msg) {
@@ -412,10 +412,19 @@ assert(!/"mode"\s*:\s*"smart"/.test(babaConfig), "fetcher does not use Smart Pla
 assert(babaConfig.includes('"workers_dev": false'), "fetcher has no workers.dev URL");
 assert(mainConfig.includes('"command": "node scripts/ensure-baba-fetcher.mjs"'), "main deploy prepares the fetcher first");
 assert(mainConfig.includes('"binding": "BABA_FETCHER"'), "main binds BABA_FETCHER");
-assert(shouldDeployFetcher({ workersCi: undefined, branch: "main", fetcherExists: false }) === false, "local wrangler does not deploy the fetcher");
-assert(shouldDeployFetcher({ workersCi: "1", branch: "main", fetcherExists: true }) === true, "main always deploys the fetcher");
-assert(shouldDeployFetcher({ workersCi: "1", branch: "cursor/baba", fetcherExists: false }) === true, "a branch creates the fetcher when it is missing");
-assert(shouldDeployFetcher({ workersCi: "1", branch: "cursor/baba", fetcherExists: true }) === false, "a branch does not overwrite an existing fetcher");
+assert(shouldDeployFetcher({ workersCi: undefined, branch: "main" }) === false, "local wrangler does not deploy the fetcher");
+assert(shouldDeployFetcher({ workersCi: "1", branch: "main" }) === true, "main deploys the fetcher");
+assert(shouldDeployFetcher({ workersCi: "1", branch: "cursor/baba" }) === false, "a non-main branch deploys nothing");
+assert(shouldDeployFetcher({ workersCi: "1", branch: "" }) === false, "a missing branch deploys nothing");
+const stripped = envForFetcherDeploy({
+  WRANGLER_CI_OVERRIDE_NAME: "jra-dify-pipeline",
+  WRANGLER_CI_MATCH_TAG: "tag",
+  WRANGLER_CI_GENERATE_PREVIEW_ALIAS: "true",
+  CLOUDFLARE_API_TOKEN: "kept",
+});
+assert(stripped.WRANGLER_CI_OVERRIDE_NAME === undefined, "fetcher deploy drops the CI name override");
+assert(stripped.WRANGLER_CI_MATCH_TAG === undefined, "fetcher deploy drops the CI tag match");
+assert(stripped.CLOUDFLARE_API_TOKEN === "kept", "fetcher deploy keeps the API token");
 const ensure = spawnSync(process.execPath, ["scripts/ensure-baba-fetcher.mjs"], { encoding: "utf8" });
 assert(ensure.status === 0, `ensure script is a no-op without WORKERS_CI (status ${ensure.status})`);
 assert(mainConfig.includes('"service": "jra-baba-fetcher"'), "binding targets jra-baba-fetcher");
