@@ -81,8 +81,8 @@ npm install
 
 | npm script | 内容 |
 | --- | --- |
-| `npm run dev` | ローカル開発（`wrangler dev`） |
-| `npm run deploy` | 手元から Cloudflare へデプロイ（普段は `main` へのマージで自動） |
+| `npm run dev` | ローカル開発。本体と馬場取得 Worker を同時に起動する |
+| `npm run deploy` | 馬場取得 Worker を先に、続けて本体をデプロイする。Workers Builds の Deploy command もこれに合わせる |
 | `npm run tail` | 本番ログを購読 |
 | `npm test` | 1R 検証、シード逆算、scheduled の翌日投入、Dify 同時実行数などのローカルテスト |
 | `npm run cf-typegen` | Worker の型定義を生成 |
@@ -221,7 +221,19 @@ curl -H "Authorization: Bearer $PREDICT_SECRET" \
 
 ## 馬場状態（クッション値・含水率）
 
-`/run` および Cron 投入時に、JRA 公式の馬場情報を取得して**対象場の分だけを `remarks`（備考欄）に追記**します。設定は不要（常時有効）で、予測ロジック自体は Dify 側なので、備考欄のテキストを読んで予想に反映してください。取得に失敗しても投入は止めず、その回だけ馬場情報なしで送ります。
+`/run` および Cron 投入時に、JRA 公式の馬場情報を取得して**対象場の分だけを `remarks`（備考欄）に追記**します。設定は不要（常時有効）で、予測ロジック自体は Dify 側なので、備考欄のテキストを読んで予想に反映してください。取得に失敗しても投入は止めず、その回だけ馬場情報なしで送ります。取れないときは `/baba/latest` もこれまでどおり `502` です。保存した古い値では返しません。
+
+### 取得場所（東京付近の別 Worker）
+
+JRA（`www.jra.go.jp`、前段は Akamai）への GET は、本体ではなく `jra-baba-fetcher` が行います。配置は `wrangler.baba.jsonc` の `placement.region` = `aws:ap-northeast-1`（東京に最も近い Cloudflare 拠点）です。Worker は AWS の中では動きません。
+
+本体 `jra-dify-pipeline` は Service Binding `BABA_FETCHER` の **`fetch()`** でこの Worker を呼びます。RPC メソッドには [placement が効かない](https://developers.cloudflare.com/workers/runtime-apis/rpc/) ため使いません。Dify を呼ぶ queue、各場 1R の URL 検証、`/kick` などの画面は本体のままです。Cron の馬場取得も同じ binding を通るので、scheduled 自体は移動しません。
+
+`placement` は [fetch ハンドラにだけ効きます](https://developers.cloudflare.com/workers/configuration/placement/)。Smart Placement（`mode: "smart"`）は遅延の最適化で、日本に固定できず、その Worker が一度も動いていない拠点は候補に入りません。`placement.hostname` は anycast の起点を特定できないため、Akamai の `jra.go.jp` には使いません。
+
+公開の `workers.dev` URL は fetcher に付けていません（`workers_dev: false`）。外から馬場を読む入口は従来の `/baba` と `/baba/latest` だけです。
+
+ローカルの `npm run dev` は両方の設定を起動します。ローカル実行は placement を再現しないので、JRA への接続元はそのマシンです。
 
 `remarks` の例:
 
@@ -336,7 +348,7 @@ curl "https://jra-dify-pipeline.hdsk.workers.dev/baba?date=2026-09-13"
 
 ## Cloudflare へのデプロイ
 
-GitHub の `main` にマージすると、Cloudflare が Worker を自動デプロイします（Workers Builds / Git 連携）。普段の反映は PR を `main` に入れるだけで十分です。`npm run deploy` は手元から出すときの手動手段です。シークレット（`wrangler secret put`）はデプロイでは上書きされないので、キーの追加・変更だけ別途必要です。
+GitHub の `main` にマージすると、Cloudflare が Workers Builds でデプロイします。馬場取得は別 Worker `jra-baba-fetcher` です。Builds の **Deploy command** を `npm run deploy` にしておかないと、既定の `npx wrangler deploy` は本体だけを上げ、未作成の Service Binding で失敗します（失敗したビルドは本番の現行バージョンを置き換えません）。`npm run deploy` は fetcher を先に、続けて本体をデプロイします。手元から出すときも同じコマンドです。シークレット（`wrangler secret put`）はデプロイでは上書きされないので、キーの追加・変更だけ別途必要です。fetcher にシークレットはありません。
 
 初回セットアップの手順は公式の [Queues 入門](https://developers.cloudflare.com/queues/get-started/)、[Secrets](https://developers.cloudflare.com/workers/configuration/secrets/)、[Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/) に沿っています。`wrangler.jsonc` 側の producer / consumer / Cron 定義は済みです。
 
@@ -418,6 +430,9 @@ npm run deploy
 | Dify タイムアウト／切断 | `console.warn` | `Dify timeout\|disconnect (ack, no retry): ...` |
 | Dify リトライ対象失敗 | `console.error` | `Dify retryable failure: ...` |
 | Dify 最終失敗メール | `console.log` | `Notifying Dify failure for ...` |
+| 馬場取得の成功 | `console.log`（`jra-baba-fetcher`） | `baba_fetch_ok`。`colo` は外向き fetch の拠点（trace）。`requestColo` は fetcher の `request.cf.colo`。`egressColo` / `loc` は trace。`ingressColo` は本体が受けた拠点 |
+| 馬場取得の失敗 | `console.error` / `console.warn`（`jra-baba-fetcher`） | `baba_fetch_failed`。cushion / moist は error、index は warn。`status` に 403 など。拠点フィールドは成功時と同じ |
+| 馬場 Worker の配置 | `console.log`（本体） | `baba_fetch_placement`。`placement` は応答の `cf-placement`（例 `remote-NRT`）。付かないときは null |
 
 `GET /` は馬柱 URL を 1 行ずつ返すプレーンテキストです。日付や場コードは本文に含みません。Queue にも載せません。
 
@@ -441,6 +456,28 @@ npx wrangler tail --status error
 4. **Issues（問題検出）** で例外・5xx・`console.error` のグルーピング（`observability.issues.enabled` 済み。有効化後の新規障害のみ）
 
 Cron の実行履歴は Worker の **Settings → Triggers** 付近の Cron Events（直近 100 件程度）でも見られます。
+
+馬場の取得拠点は **Workers & Pages → `jra-baba-fetcher` → Observability** で見ます。成功は `baba_fetch_ok`、失敗は `baba_fetch_failed` です。`colo` が日本（`NRT` / `HND` / `KIX` / `FUK` / `OKA`）か近隣（`ICN` / `TPE` / `HKG` / `SIN`）か、403 が残っているかをここで確認します。本体側の `baba_fetch_placement` は `cf-placement`（`remote-NRT` なら東京付近へ転送済み、`local-...` なら転送されていません）です。
+
+アカウント全体の [telemetry query](https://developers.cloudflare.com/api/resources/workers/subresources/observability/subresources/telemetry/methods/query/) では、`$metadata.service` と全文検索の `needle` を同時に指定します。
+
+```json
+{
+  "queryId": "baba-fetch-failed",
+  "view": "events",
+  "timeframe": { "from": 0, "to": 0 },
+  "parameters": {
+    "filterCombination": "and",
+    "filters": [
+      { "key": "$metadata.service", "operation": "eq", "type": "string", "value": "jra-baba-fetcher" }
+    ],
+    "needle": { "value": "baba_fetch_failed", "isRegex": false, "matchCase": false },
+    "limit": 50
+  }
+}
+```
+
+`timeframe.from` / `to` は Unix ミリ秒です。成功だけ見るときは `needle.value` を `baba_fetch_ok` にします。配置ヘッダーは本体なので `value` を `jra-dify-pipeline`、`needle.value` を `baba_fetch_placement` にします。403 の有無は `baba_fetch_failed` の `status` です。
 
 ## 手動実行
 
@@ -557,6 +594,8 @@ PREDICT_SECRET=local-dev-secret
 ```bash
 npm run dev
 ```
+
+`wrangler dev` を設定ファイル 1 つだけで起動すると、馬場用の Service Binding が繋がらず `/baba/latest` は `502` になります。`npm run dev` は本体と `jra-baba-fetcher` を一緒に起動します。
 
 既定は `http://localhost:8787` です。Queue は Miniflare 上でシミュレートされます（[`wrangler dev --remote` は Queues 非対応](https://developers.cloudflare.com/queues/configuration/local-development/)）。
 

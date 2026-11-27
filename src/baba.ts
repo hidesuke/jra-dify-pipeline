@@ -223,6 +223,9 @@ const decodeShiftJis = async (res: Response) =>
 /** Workers Logs で絞る。1 行 JSON の event。cushion / moist は console.error、index は console.warn。 */
 export const BABA_FETCH_FAILED_EVENT = "baba_fetch_failed";
 
+/** 本体が fetcher に渡す、受信リクエストの cf.colo。JRA へは送らない。 */
+export const INGRESS_COLO_HEADER = "x-baba-ingress-colo";
+
 const BABA_FETCH_LOG_BODY_LIMIT = 2048;
 
 const BABA_FETCH_LOG_HEADERS = [
@@ -248,12 +251,49 @@ function errorMessage(error: unknown): string {
 /**
  * 受信リクエストの cf.colo。Request が無い経路（Cron など）では null。
  * cf は IncomingRequestCfProperties と RequestInitCfProperties の共用なので、colo があるときだけ読む。
+ * これはリクエストが入った拠点であり、placement 後の実行拠点とは限らない。
  */
 export function requestColo(req: { cf?: unknown } | null | undefined): string | null {
   const cf = req?.cf;
   if (!cf || typeof cf !== "object") return null;
   const colo = (cf as { colo?: unknown }).colo;
   return typeof colo === "string" && colo.length > 0 ? colo : null;
+}
+
+/** IATA 3 文字だけを通す。ヘッダー経由の値をログに出す前に使う。 */
+export function normalizeAirportCode(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const code = value.trim().toUpperCase();
+  return /^[A-Z]{3}$/.test(code) ? code : null;
+}
+
+/**
+ * JRA へ取りに行った側の拠点。
+ * colo はログの colo フィールド（外向き fetch の拠点。trace が無ければ request.cf.colo）。
+ * requestColo は fetcher が見た request.cf.colo。Service Binding では空か、呼び出し元の値になり得る。
+ * egressColo / loc は cdn-cgi/trace の値。ingressColo は本体が受け取ったリクエストの cf.colo。
+ */
+export interface BabaColoInfo {
+  colo: string | null;
+  requestColo: string | null;
+  egressColo: string | null;
+  loc: string | null;
+  ingressColo: string | null;
+}
+
+export type BabaColoArg = string | BabaColoInfo | null;
+
+function coloLogFields(colo: BabaColoArg | undefined): Record<string, string | null> {
+  if (typeof colo === "object" && colo) {
+    return {
+      colo: colo.colo,
+      requestColo: colo.requestColo,
+      egressColo: colo.egressColo,
+      loc: colo.loc,
+      ingressColo: colo.ingressColo,
+    };
+  }
+  return { colo: colo ?? null };
 }
 
 /** 調査に使う応答ヘッダー。set-cookie は値を出さず有無だけ。 */
@@ -320,7 +360,7 @@ async function fetchBabaSource(
   target: BabaFetchTarget,
   url: string,
   fetchImpl: FetchLike,
-  colo: string | null
+  colo: BabaColoArg
 ): Promise<Response> {
   const level = target === "index" ? "warn" : "error";
   let res: Response;
@@ -332,7 +372,7 @@ async function fetchBabaSource(
         target,
         url,
         error: errorMessage(error),
-        colo,
+        ...coloLogFields(colo),
       },
       level
     );
@@ -351,7 +391,7 @@ async function fetchBabaSource(
         bodyLength: prefix.bodyLength,
         bodyTruncated: prefix.bodyTruncated,
         ...(prefix.bodyReadError ? { bodyReadError: prefix.bodyReadError } : {}),
-        colo,
+        ...coloLogFields(colo),
       },
       level
     );
@@ -361,9 +401,9 @@ async function fetchBabaSource(
 
 /**
  * JRA から馬場データを取得・パースする。取得失敗時は例外を投げる。
- * colo は受信リクエストの cf.colo。失敗ログにだけ使い、取得処理自体は変えない。
+ * colo は失敗ログにだけ使い、取得処理自体は変えない。リクエストヘッダーは足さない。
  */
-export async function fetchBaba(fetchImpl: FetchLike = fetch, colo: string | null = null): Promise<VenueBaba[]> {
+export async function fetchBaba(fetchImpl: FetchLike = fetch, colo: BabaColoArg = null): Promise<VenueBaba[]> {
   const [cushionRes, moistRes] = await Promise.all([
     fetchBabaSource("cushion", CUSHION_URL, fetchImpl, colo),
     fetchBabaSource("moist", MOIST_URL, fetchImpl, colo),
@@ -445,7 +485,7 @@ export function parseCourseInfo(html: string): CourseInfo | null {
  */
 export async function fetchCourseInfoByVenue(
   fetchImpl: FetchLike = fetch,
-  colo: string | null = null
+  colo: BabaColoArg = null
 ): Promise<Map<string, CourseInfo>> {
   const map = new Map<string, CourseInfo>();
   await Promise.all(

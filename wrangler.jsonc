@@ -41,6 +41,12 @@
       "45 7 * * SAT"  // 土曜 16:45 JST
     ]
   },
+  // 馬場取得だけ別 Worker。placement は Worker の fetch ハンドラ全体に効くため、
+  // Dify の queue や 1R 検証を東京へ寄せない。RPC は placement が効かないので fetch() で呼ぶ。
+  // 先に jra-baba-fetcher をデプロイしないと、この binding 付きのデプロイは失敗する。
+  "services": [
+    { "binding": "BABA_FETCHER", "service": "jra-baba-fetcher" }
+  ],
   "queues": {
     "producers": [
       { "binding": "RACE_QUEUE", "queue": "jra-race-queue" }
