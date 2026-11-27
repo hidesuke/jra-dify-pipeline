@@ -3,6 +3,7 @@ import { getSchedulesForDate, type ScheduleItem } from "./schedules/index.ts";
 import {
   fetchBaba,
   fetchCourseInfoByVenue,
+  requestColo,
   selectMeasurement,
   formatBabaSummary,
   buildLatestBaba,
@@ -103,11 +104,15 @@ function prefixOf(env: Env): string {
  */
 async function loadBabaByVenue(
   targetDate: string,
-  venueCodes: string[]
+  venueCodes: string[],
+  colo: string | null = null
 ): Promise<Map<string, BabaAttachment>> {
   const map = new Map<string, BabaAttachment>();
   try {
-    const [venues, courseByVenue] = await Promise.all([fetchBaba(), fetchCourseInfoByVenue()]);
+    const [venues, courseByVenue] = await Promise.all([
+      fetchBaba(fetch, colo),
+      fetchCourseInfoByVenue(fetch, colo),
+    ]);
     for (const code of new Set(venueCodes)) {
       const sel = selectMeasurement(venues, code, targetDate);
       if (!sel) continue;
@@ -379,7 +384,7 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
     const denied = await authorizePredict(req, env, ctx);
     if (denied) return denied;
     return handleSeedRequest(req, env, (updated, pending) =>
-      enqueueAfterSeedUpdate(env, updated, pending)
+      enqueueAfterSeedUpdate(env, updated, pending, requestColo(req))
     );
   }
 
@@ -472,7 +477,8 @@ function logVerification(date: string, checks: RaceUrlCheck[]): void {
 async function enqueueAfterSeedUpdate(
   env: Env,
   updated: UpdatedVenueSeed,
-  pending: PendingCorrection[]
+  pending: PendingCorrection[],
+  colo: string | null = null
 ): Promise<SeedEnqueueResult[]> {
   const results: SeedEnqueueResult[] = [];
   const prefix = prefixOf(env);
@@ -494,7 +500,7 @@ async function enqueueAfterSeedUpdate(
       checks.filter((c) => !c.ok).map((c) => c.venueCode)
     );
     const okRows = rows.filter((r) => !stillBad.has(r.venueCode));
-    const babaByVenue = await loadBabaByVenue(item.date, okRows.map((r) => r.venueCode));
+    const babaByVenue = await loadBabaByVenue(item.date, okRows.map((r) => r.venueCode), colo);
     const messages: MessageSendRequest<RaceMessage>[] = okRows.map((r) => ({
       body: {
         targetDate: item.date,
@@ -574,7 +580,11 @@ async function babaLatest(req: Request): Promise<Response> {
   }
 
   try {
-    const [venues, courseByVenue] = await Promise.all([fetchBaba(), fetchCourseInfoByVenue()]);
+    const colo = requestColo(req);
+    const [venues, courseByVenue] = await Promise.all([
+      fetchBaba(fetch, colo),
+      fetchCourseInfoByVenue(fetch, colo),
+    ]);
     const payload = buildLatestBaba(venues, courseByVenue, { venueFilter: venue });
     if (venue && payload.venues.length === 0) {
       const msg = `no baba data for venue: ${venue}`;
@@ -603,7 +613,11 @@ async function babaDebug(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const date = url.searchParams.get("date") || undefined;
   try {
-    const [venues, courseByVenue] = await Promise.all([fetchBaba(), fetchCourseInfoByVenue()]);
+    const colo = requestColo(req);
+    const [venues, courseByVenue] = await Promise.all([
+      fetchBaba(fetch, colo),
+      fetchCourseInfoByVenue(fetch, colo),
+    ]);
     const course = Object.fromEntries(courseByVenue);
     const selected = date
       ? venues.map((v) => ({
@@ -743,7 +757,7 @@ async function enqueueRaces(req: Request, env: Env): Promise<Response> {
     return plainOrKickResult(req, false, text, 422, "1R URL の検証に失敗したため投入しませんでした。");
   }
 
-  const babaByVenue = await loadBabaByVenue(resolved.date, rows.map((r) => r.venueCode));
+  const babaByVenue = await loadBabaByVenue(resolved.date, rows.map((r) => r.venueCode), requestColo(req));
 
   const messages = rows.map((r) => ({
     body: {
