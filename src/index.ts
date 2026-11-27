@@ -1,13 +1,12 @@
 import { authorizePredict } from "./access.ts";
 import { getSchedulesForDate, type ScheduleItem } from "./schedules/index.ts";
 import {
-  requestColo,
+  fetchBabaAndCourse,
   selectMeasurement,
   formatBabaSummary,
   buildLatestBaba,
   resolveVenueKey,
 } from "./baba.ts";
-import { fetchBabaBundle } from "./babaClient.ts";
 import { notifyDifyFailure, notifyRaceUrlFailures } from "./notify.ts";
 import { verifyVenue1RUrls, type RaceUrlCheck } from "./verifyRaceUrl.ts";
 import { DEFAULT_PREFIX } from "./checksum.ts";
@@ -59,11 +58,6 @@ export interface Env {
   NOTIFY_EMAIL?: string;
   /** From（koumeinowana.info 上のアドレス） */
   NOTIFY_FROM?: string;
-  /**
-   * 馬場取得 Worker（jra-baba-fetcher）。
-   * fetch ハンドラに placement.region=aws:ap-northeast-1 が付く。RPC では呼ばない。
-   */
-  BABA_FETCHER: Fetcher;
 }
 
 /** RaceMessage に載せる馬場サマリ（remarks へ差し込む） */
@@ -105,16 +99,16 @@ function prefixOf(env: Env): string {
 /**
  * 対象日の各場について馬場データを 1 件ずつ引く（best-effort）。
  * 取得に失敗しても投入は止めない（空 Map を返す）。
+ * req が無い経路（Cron）でも JRA は取る。placement は fetch ハンドラにだけ効く。
  */
 async function loadBabaByVenue(
-  env: Env,
   targetDate: string,
   venueCodes: string[],
-  colo: string | null = null
+  req: { cf?: unknown; headers?: Headers } | null = null
 ): Promise<Map<string, BabaAttachment>> {
   const map = new Map<string, BabaAttachment>();
   try {
-    const { venues, courseByVenue } = await fetchBabaBundle(env.BABA_FETCHER, colo);
+    const { venues, courseByVenue } = await fetchBabaAndCourse(fetch, req);
     for (const code of new Set(venueCodes)) {
       const sel = selectMeasurement(venues, code, targetDate);
       if (!sel) continue;
@@ -295,7 +289,7 @@ export default {
       return;
     }
 
-    const babaByVenue = await loadBabaByVenue(env, targetDateKey, rows.map((r) => r.venueCode));
+    const babaByVenue = await loadBabaByVenue(targetDateKey, rows.map((r) => r.venueCode));
     const messages: MessageSendRequest<RaceMessage>[] = rows.map((r) => ({
       body: {
         targetDate: targetDateKey,
@@ -386,7 +380,7 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
     const denied = await authorizePredict(req, env, ctx);
     if (denied) return denied;
     return handleSeedRequest(req, env, (updated, pending) =>
-      enqueueAfterSeedUpdate(env, updated, pending, requestColo(req))
+      enqueueAfterSeedUpdate(env, updated, pending, req)
     );
   }
 
@@ -401,11 +395,11 @@ async function handleFetch(req: Request, env: Env, ctx: ExecutionContext): Promi
     if (req.method !== "GET" && req.method !== "HEAD") {
       return new Response("Method not allowed\n", { status: 405, headers: publicHeaders("text/plain; charset=utf-8") });
     }
-    return babaLatest(req, env);
+    return babaLatest(req);
   }
 
   if (path === "/baba") {
-    return babaDebug(req, env);
+    return babaDebug(req);
   }
 
   if (path !== "/") {
@@ -480,7 +474,7 @@ async function enqueueAfterSeedUpdate(
   env: Env,
   updated: UpdatedVenueSeed,
   pending: PendingCorrection[],
-  colo: string | null = null
+  req: { cf?: unknown; headers?: Headers } | null = null
 ): Promise<SeedEnqueueResult[]> {
   const results: SeedEnqueueResult[] = [];
   const prefix = prefixOf(env);
@@ -502,7 +496,7 @@ async function enqueueAfterSeedUpdate(
       checks.filter((c) => !c.ok).map((c) => c.venueCode)
     );
     const okRows = rows.filter((r) => !stillBad.has(r.venueCode));
-    const babaByVenue = await loadBabaByVenue(env, item.date, okRows.map((r) => r.venueCode), colo);
+    const babaByVenue = await loadBabaByVenue(item.date, okRows.map((r) => r.venueCode), req);
     const messages: MessageSendRequest<RaceMessage>[] = okRows.map((r) => ({
       body: {
         targetDate: item.date,
@@ -565,7 +559,7 @@ function publicJson(data: unknown, status = 200): Response {
 
 // GET /baba/latest : 各場の最新計測だけを返す（認証なし・AI / HTTP ツール向け）。
 // ?venue=06 または ?venue=中山 で 1 場に絞る。?format=text で text/plain。
-async function babaLatest(req: Request, env: Env): Promise<Response> {
+async function babaLatest(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const venue = url.searchParams.get("venue") || undefined;
   const format = (url.searchParams.get("format") || "json").toLowerCase();
@@ -582,7 +576,7 @@ async function babaLatest(req: Request, env: Env): Promise<Response> {
   }
 
   try {
-    const { venues, courseByVenue } = await fetchBabaBundle(env.BABA_FETCHER, requestColo(req));
+    const { venues, courseByVenue } = await fetchBabaAndCourse(fetch, req);
     const payload = buildLatestBaba(venues, courseByVenue, { venueFilter: venue });
     if (venue && payload.venues.length === 0) {
       const msg = `no baba data for venue: ${venue}`;
@@ -607,11 +601,11 @@ async function babaLatest(req: Request, env: Env): Promise<Response> {
 
 // GET /baba : 取得・パースした馬場データを JSON で返す（読み取り専用・認証なし）。
 // ?date=YYYY-MM-DD を付けると、各場について選ばれる計測（対象日 or 直近参考値）も返す。
-async function babaDebug(req: Request, env: Env): Promise<Response> {
+async function babaDebug(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const date = url.searchParams.get("date") || undefined;
   try {
-    const { venues, courseByVenue } = await fetchBabaBundle(env.BABA_FETCHER, requestColo(req));
+    const { venues, courseByVenue } = await fetchBabaAndCourse(fetch, req);
     const course = Object.fromEntries(courseByVenue);
     const selected = date
       ? venues.map((v) => ({
@@ -751,7 +745,7 @@ async function enqueueRaces(req: Request, env: Env): Promise<Response> {
     return plainOrKickResult(req, false, text, 422, "1R URL の検証に失敗したため投入しませんでした。");
   }
 
-  const babaByVenue = await loadBabaByVenue(env, resolved.date, rows.map((r) => r.venueCode), requestColo(req));
+  const babaByVenue = await loadBabaByVenue(resolved.date, rows.map((r) => r.venueCode), req);
 
   const messages = rows.map((r) => ({
     body: {

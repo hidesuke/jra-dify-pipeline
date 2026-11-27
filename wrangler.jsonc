@@ -2,10 +2,10 @@
   "name": "jra-dify-pipeline",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-01",
-  // main の Workers Builds では、この command が本体のアップロード前に jra-baba-fetcher を出す。
-  // main 以外とローカルの dev では何もしない。PR は未作成の Service Binding で失敗してよい。
-  "build": {
-    "command": "node scripts/ensure-baba-fetcher.mjs"
+  // fetch ハンドラを、AWS 東京（ap-northeast-1）に最も近い Cloudflare 拠点で動かす。
+  // scheduled と queue には効かない。Worker 自体は AWS の中では動かない。
+  "placement": {
+    "region": "aws:ap-northeast-1"
   },
   // Workers Logs（ダッシュボード Observability）。Free でも利用可
   // issues = 問題検出（例外・5xx・console.error をグルーピング。ベータ中は無料）
@@ -46,13 +46,6 @@
       "45 7 * * SAT"  // 土曜 16:45 JST
     ]
   },
-  // 馬場取得だけ別 Worker。placement は Worker の fetch ハンドラ全体に効くため、
-  // Dify の queue や 1R 検証を東京へ寄せない。RPC は placement が効かないので fetch() で呼ぶ。
-  // 先に jra-baba-fetcher が無いと、この binding 付きのアップロードは失敗する。
-  // main のビルドでは上の build.command が先に出す。PR のビルドは出さない。
-  "services": [
-    { "binding": "BABA_FETCHER", "service": "jra-baba-fetcher" }
-  ],
   "queues": {
     "producers": [
       { "binding": "RACE_QUEUE", "queue": "jra-race-queue" }

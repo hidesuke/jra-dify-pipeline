@@ -223,8 +223,14 @@ const decodeShiftJis = async (res: Response) =>
 /** Workers Logs で絞る。1 行 JSON の event。cushion / moist は console.error、index は console.warn。 */
 export const BABA_FETCH_FAILED_EVENT = "baba_fetch_failed";
 
-/** 本体が fetcher に渡す、受信リクエストの cf.colo。JRA へは送らない。 */
-export const INGRESS_COLO_HEADER = "x-baba-ingress-colo";
+/** 馬場取得が成功したときの 1 行。console.log。 */
+export const BABA_FETCH_OK_EVENT = "baba_fetch_ok";
+
+/** 外向き fetch が出た拠点。本文の IP はログに出さない。 */
+export const TRACE_URL = "https://www.cloudflare.com/cdn-cgi/trace";
+
+const TRACE_TIMEOUT_MS = 2000;
+const TRACE_BODY_LIMIT = 4096;
 
 const BABA_FETCH_LOG_BODY_LIMIT = 2048;
 
@@ -269,16 +275,16 @@ export function normalizeAirportCode(value: unknown): string | null {
 
 /**
  * JRA へ取りに行った側の拠点。
- * colo はログの colo フィールド（外向き fetch の拠点。trace が無ければ request.cf.colo）。
- * requestColo は fetcher が見た request.cf.colo。Service Binding では空か、呼び出し元の値になり得る。
- * egressColo / loc は cdn-cgi/trace の値。ingressColo は本体が受け取ったリクエストの cf.colo。
+ * colo はログの colo（trace の colo。無ければ request.cf.colo）。
+ * requestColo は request.cf.colo。入った拠点で、placement 後の実行拠点とは限らない。
+ * egressColo / loc は cdn-cgi/trace。placement はリクエストの cf-placement。付かないときは null。
  */
 export interface BabaColoInfo {
   colo: string | null;
   requestColo: string | null;
   egressColo: string | null;
   loc: string | null;
-  ingressColo: string | null;
+  placement: string | null;
 }
 
 export type BabaColoArg = string | BabaColoInfo | null;
@@ -290,10 +296,93 @@ function coloLogFields(colo: BabaColoArg | undefined): Record<string, string | n
       requestColo: colo.requestColo,
       egressColo: colo.egressColo,
       loc: colo.loc,
-      ingressColo: colo.ingressColo,
+      placement: colo.placement,
     };
   }
   return { colo: colo ?? null };
+}
+
+export function parseTraceBody(text: string): { egressColo: string | null; loc: string | null } {
+  let egressColo: string | null = null;
+  let loc: string | null = null;
+  for (const line of text.split(/\r?\n/)) {
+    const eq = line.indexOf("=");
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq);
+    const value = line.slice(eq + 1).trim();
+    if (key === "colo") egressColo = normalizeAirportCode(value);
+    if (key === "loc" && /^[A-Za-z]{2}$/.test(value)) loc = value.toUpperCase();
+  }
+  return { egressColo, loc };
+}
+
+/** この Worker の外向き fetch が出た拠点。失敗しても JRA 取得は続ける。 */
+export async function readEgressLocation(
+  fetchImpl: FetchLike
+): Promise<{ egressColo: string | null; loc: string | null }> {
+  try {
+    const signal = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+      ? AbortSignal.timeout(TRACE_TIMEOUT_MS)
+      : undefined;
+    const res = await fetchImpl(TRACE_URL, { cache: "no-store", signal });
+    if (!res.ok) return { egressColo: null, loc: null };
+    const text = await res.text();
+    if (text.length > TRACE_BODY_LIMIT) return { egressColo: null, loc: null };
+    return parseTraceBody(text);
+  } catch {
+    return { egressColo: null, loc: null };
+  }
+}
+
+function safePlacement(value: string | null): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  return /^[A-Za-z0-9_-]{1,32}$/.test(trimmed) ? trimmed : null;
+}
+
+export async function resolveBabaColo(
+  req: { cf?: unknown; headers?: { get(name: string): string | null } } | null | undefined,
+  fetchImpl: FetchLike = fetch
+): Promise<BabaColoInfo> {
+  const requestColoValue = requestColo(req);
+  const { egressColo, loc } = await readEgressLocation(fetchImpl);
+  return {
+    colo: egressColo ?? requestColoValue,
+    requestColo: requestColoValue,
+    egressColo,
+    loc,
+    placement: safePlacement(req?.headers?.get("cf-placement") ?? null),
+  };
+}
+
+export function logBabaFetchOk(info: BabaColoInfo, venues: number, courses: number): void {
+  try {
+    console.log(
+      JSON.stringify({
+        event: BABA_FETCH_OK_EVENT,
+        ...info,
+        venues,
+        courses,
+        timestamp: new Date().toISOString(),
+      })
+    );
+  } catch {
+    // ログ出力の失敗で取得結果は変えない
+  }
+}
+
+/** クッション・含水率とコース情報。成功時に baba_fetch_ok を 1 行出す。 */
+export async function fetchBabaAndCourse(
+  fetchImpl: FetchLike = fetch,
+  req: { cf?: unknown; headers?: { get(name: string): string | null } } | null = null
+): Promise<{ venues: VenueBaba[]; courseByVenue: Map<string, CourseInfo> }> {
+  const colo = await resolveBabaColo(req, fetchImpl);
+  const [venues, courseByVenue] = await Promise.all([
+    fetchBaba(fetchImpl, colo),
+    fetchCourseInfoByVenue(fetchImpl, colo),
+  ]);
+  logBabaFetchOk(colo, venues.length, courseByVenue.size);
+  return { venues, courseByVenue };
 }
 
 /** 調査に使う応答ヘッダー。set-cookie は値を出さず有無だけ。 */
