@@ -2,6 +2,11 @@
   "name": "jra-dify-pipeline",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-01",
+  // Workers Builds の既定 `npx wrangler deploy` は、この command を本体のアップロード前に走る。
+  // WORKERS_CI=1 のときだけ jra-baba-fetcher を先に出す。ローカルの dev では何もしない。
+  "build": {
+    "command": "node scripts/ensure-baba-fetcher.mjs"
+  },
   // Workers Logs（ダッシュボード Observability）。Free でも利用可
   // issues = 問題検出（例外・5xx・console.error をグルーピング。ベータ中は無料）
   "observability": {
@@ -43,7 +48,8 @@
   },
   // 馬場取得だけ別 Worker。placement は Worker の fetch ハンドラ全体に効くため、
   // Dify の queue や 1R 検証を東京へ寄せない。RPC は placement が効かないので fetch() で呼ぶ。
-  // 先に jra-baba-fetcher をデプロイしないと、この binding 付きのデプロイは失敗する。
+  // 先に jra-baba-fetcher が無いと、この binding 付きのデプロイは失敗する。
+  // Workers Builds では上の build.command が先に作る。
   "services": [
     { "binding": "BABA_FETCHER", "service": "jra-baba-fetcher" }
   ],

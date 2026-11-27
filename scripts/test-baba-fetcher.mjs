@@ -21,6 +21,8 @@ import {
   readEgressLocation,
 } from "../src/babaFetcher.ts";
 import worker from "../src/index.ts";
+import { spawnSync } from "node:child_process";
+import { shouldDeployFetcher } from "./ensure-baba-fetcher.mjs";
 
 let failed = 0;
 function assert(cond, msg) {
@@ -408,7 +410,14 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 assert(babaConfig.includes('"region": "aws:ap-northeast-1"'), "fetcher placement is Tokyo");
 assert(!/"mode"\s*:\s*"smart"/.test(babaConfig), "fetcher does not use Smart Placement");
 assert(babaConfig.includes('"workers_dev": false'), "fetcher has no workers.dev URL");
+assert(mainConfig.includes('"command": "node scripts/ensure-baba-fetcher.mjs"'), "main deploy prepares the fetcher first");
 assert(mainConfig.includes('"binding": "BABA_FETCHER"'), "main binds BABA_FETCHER");
+assert(shouldDeployFetcher({ workersCi: undefined, branch: "main", fetcherExists: false }) === false, "local wrangler does not deploy the fetcher");
+assert(shouldDeployFetcher({ workersCi: "1", branch: "main", fetcherExists: true }) === true, "main always deploys the fetcher");
+assert(shouldDeployFetcher({ workersCi: "1", branch: "cursor/baba", fetcherExists: false }) === true, "a branch creates the fetcher when it is missing");
+assert(shouldDeployFetcher({ workersCi: "1", branch: "cursor/baba", fetcherExists: true }) === false, "a branch does not overwrite an existing fetcher");
+const ensure = spawnSync(process.execPath, ["scripts/ensure-baba-fetcher.mjs"], { encoding: "utf8" });
+assert(ensure.status === 0, `ensure script is a no-op without WORKERS_CI (status ${ensure.status})`);
 assert(mainConfig.includes('"service": "jra-baba-fetcher"'), "binding targets jra-baba-fetcher");
 assert(
   pkg.scripts.deploy.startsWith("wrangler deploy -c wrangler.baba.jsonc && "),

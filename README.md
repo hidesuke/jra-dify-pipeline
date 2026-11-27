@@ -82,7 +82,7 @@ npm install
 | npm script | 内容 |
 | --- | --- |
 | `npm run dev` | ローカル開発。本体と馬場取得 Worker を同時に起動する |
-| `npm run deploy` | 馬場取得 Worker を先に、続けて本体をデプロイする。Workers Builds の Deploy command もこれに合わせる |
+| `npm run deploy` | 手元から、馬場取得 Worker を先に、続けて本体をデプロイする |
 | `npm run tail` | 本番ログを購読 |
 | `npm test` | 1R 検証、シード逆算、scheduled の翌日投入、Dify 同時実行数などのローカルテスト |
 | `npm run cf-typegen` | Worker の型定義を生成 |
@@ -348,7 +348,7 @@ curl "https://jra-dify-pipeline.hdsk.workers.dev/baba?date=2026-09-13"
 
 ## Cloudflare へのデプロイ
 
-GitHub の `main` にマージすると、Cloudflare が Workers Builds でデプロイします。馬場取得は別 Worker `jra-baba-fetcher` です。Builds の **Deploy command** を `npm run deploy` にしておかないと、既定の `npx wrangler deploy` は本体だけを上げ、未作成の Service Binding で失敗します（失敗したビルドは本番の現行バージョンを置き換えません）。`npm run deploy` は fetcher を先に、続けて本体をデプロイします。手元から出すときも同じコマンドです。シークレット（`wrangler secret put`）はデプロイでは上書きされないので、キーの追加・変更だけ別途必要です。fetcher にシークレットはありません。
+GitHub の `main` にマージすると、Cloudflare が Workers Builds でデプロイします。馬場取得は別 Worker `jra-baba-fetcher` です。既定の Deploy command `npx wrangler deploy` のままでも、`wrangler.jsonc` の `build.command` が本体のアップロード前に fetcher を用意します（`WORKERS_CI=1` のときだけ。ローカルの `wrangler dev` では動きません）。`main` では毎回 fetcher を更新します。それ以外のブランチは、fetcher がまだ無いときだけ作り、PR のたびに本番の fetcher を上書きしません。手元から出すときは `npm run deploy` です。シークレット（`wrangler secret put`）はデプロイでは上書きされないので、キーの追加・変更だけ別途必要です。fetcher にシークレットはありません。
 
 初回セットアップの手順は公式の [Queues 入門](https://developers.cloudflare.com/queues/get-started/)、[Secrets](https://developers.cloudflare.com/workers/configuration/secrets/)、[Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/) に沿っています。`wrangler.jsonc` 側の producer / consumer / Cron 定義は済みです。
 
