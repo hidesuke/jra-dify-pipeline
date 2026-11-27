@@ -220,9 +220,154 @@ export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>
 const decodeShiftJis = async (res: Response) =>
   new TextDecoder("shift_jis").decode(await res.arrayBuffer());
 
-/** JRA から馬場データを取得・パースする。取得失敗時は例外を投げる */
-export async function fetchBaba(fetchImpl: FetchLike = fetch): Promise<VenueBaba[]> {
-  const [cushionRes, moistRes] = await Promise.all([fetchImpl(CUSHION_URL), fetchImpl(MOIST_URL)]);
+/** Workers Logs で絞る。1 行 JSON の event。cushion / moist は console.error、index は console.warn。 */
+export const BABA_FETCH_FAILED_EVENT = "baba_fetch_failed";
+
+const BABA_FETCH_LOG_BODY_LIMIT = 2048;
+
+const BABA_FETCH_LOG_HEADERS = [
+  "server",
+  "content-type",
+  "content-length",
+  "cf-ray",
+  "cf-cache-status",
+  "x-amz-request-id",
+  "x-cache",
+  "via",
+  "age",
+  "date",
+] as const;
+
+type BabaFetchTarget = "cushion" | "moist" | "index";
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+/**
+ * 受信リクエストの cf.colo。Request が無い経路（Cron など）では null。
+ * cf は IncomingRequestCfProperties と RequestInitCfProperties の共用なので、colo があるときだけ読む。
+ */
+export function requestColo(req: { cf?: unknown } | null | undefined): string | null {
+  const cf = req?.cf;
+  if (!cf || typeof cf !== "object") return null;
+  const colo = (cf as { colo?: unknown }).colo;
+  return typeof colo === "string" && colo.length > 0 ? colo : null;
+}
+
+/** 調査に使う応答ヘッダー。set-cookie は値を出さず有無だけ。 */
+function collectFailureHeaders(headers: Headers): Record<string, string | boolean> {
+  const out: Record<string, string | boolean> = {};
+  const named = new Set<string>(BABA_FETCH_LOG_HEADERS);
+  for (const name of BABA_FETCH_LOG_HEADERS) {
+    const value = headers.get(name);
+    if (value != null) out[name] = value;
+  }
+  out["set-cookie"] = headers.has("set-cookie");
+  headers.forEach((value, name) => {
+    const lower = name.toLowerCase();
+    if (lower === "set-cookie" || named.has(lower)) return;
+    if (!lower.includes("akamai") && !lower.startsWith("x-")) return;
+    const prev = out[lower];
+    out[lower] = typeof prev === "string" ? `${prev}, ${value}` : value;
+  });
+  return out;
+}
+
+async function readBodyPrefix(res: Response): Promise<{
+  body: string;
+  bodyLength: number;
+  bodyTruncated: boolean;
+  bodyReadError?: string;
+}> {
+  try {
+    const text = await res.text();
+    const bodyTruncated = text.length > BABA_FETCH_LOG_BODY_LIMIT;
+    return {
+      body: bodyTruncated ? text.slice(0, BABA_FETCH_LOG_BODY_LIMIT) : text,
+      bodyLength: text.length,
+      bodyTruncated,
+    };
+  } catch (error) {
+    return { body: "", bodyLength: 0, bodyTruncated: false, bodyReadError: errorMessage(error) };
+  }
+}
+
+function logBabaFetchFailed(entry: Record<string, unknown>, level: "error" | "warn"): void {
+  // index の !ok は開催数が少ないときのスキップでも起きる。console.error にすると
+  // 200 応答の呼び出しまで Issues に載るので warn にする。cushion / moist は取得失敗そのもの。
+  const write = level === "error" ? console.error : console.warn;
+  try {
+    write(
+      JSON.stringify({
+        event: BABA_FETCH_FAILED_EVENT,
+        ...entry,
+        timestamp: new Date().toISOString(),
+      })
+    );
+  } catch {
+    // ログ出力の失敗で fetch の成否や例外を変えない
+  }
+}
+
+/**
+ * 1 本の GET。200 以外とネットワークエラーだけを 1 行 JSON で残す。
+ * リクエストヘッダーは足さない。失敗してもここで例外の種類は変えない。
+ * index は開催数が少ないと 404 になり得るので warn。cushion / moist は error。
+ */
+async function fetchBabaSource(
+  target: BabaFetchTarget,
+  url: string,
+  fetchImpl: FetchLike,
+  colo: string | null
+): Promise<Response> {
+  const level = target === "index" ? "warn" : "error";
+  let res: Response;
+  try {
+    res = await fetchImpl(url);
+  } catch (error) {
+    logBabaFetchFailed(
+      {
+        target,
+        url,
+        error: errorMessage(error),
+        colo,
+      },
+      level
+    );
+    throw error;
+  }
+  if (!res.ok) {
+    const prefix = await readBodyPrefix(res);
+    logBabaFetchFailed(
+      {
+        target,
+        url,
+        status: res.status,
+        statusText: res.statusText,
+        headers: collectFailureHeaders(res.headers),
+        body: prefix.body,
+        bodyLength: prefix.bodyLength,
+        bodyTruncated: prefix.bodyTruncated,
+        ...(prefix.bodyReadError ? { bodyReadError: prefix.bodyReadError } : {}),
+        colo,
+      },
+      level
+    );
+  }
+  return res;
+}
+
+/**
+ * JRA から馬場データを取得・パースする。取得失敗時は例外を投げる。
+ * colo は受信リクエストの cf.colo。失敗ログにだけ使い、取得処理自体は変えない。
+ */
+export async function fetchBaba(fetchImpl: FetchLike = fetch, colo: string | null = null): Promise<VenueBaba[]> {
+  const [cushionRes, moistRes] = await Promise.all([
+    fetchBabaSource("cushion", CUSHION_URL, fetchImpl, colo),
+    fetchBabaSource("moist", MOIST_URL, fetchImpl, colo),
+  ]);
   if (!cushionRes.ok) throw new Error(`cushion fetch failed: ${cushionRes.status}`);
   if (!moistRes.ok) throw new Error(`moist fetch failed: ${moistRes.status}`);
   const [cushionHtml, moistHtml] = await Promise.all([decodeShiftJis(cushionRes), decodeShiftJis(moistRes)]);
@@ -294,16 +439,26 @@ export function parseCourseInfo(html: string): CourseInfo | null {
   };
 }
 
-/** 各会場のコース情報を場コード -> CourseInfo で返す（best-effort、失敗ページはスキップ） */
+/**
+ * 各会場のコース情報を場コード -> CourseInfo で返す（best-effort、失敗ページはスキップ）。
+ * 失敗時は baba_fetch_failed を残すが、返却マップは従来どおり成功ページだけ。
+ */
 export async function fetchCourseInfoByVenue(
-  fetchImpl: FetchLike = fetch
+  fetchImpl: FetchLike = fetch,
+  colo: string | null = null
 ): Promise<Map<string, CourseInfo>> {
   const map = new Map<string, CourseInfo>();
   await Promise.all(
     INDEX_URLS.map(async (url) => {
+      let res: Response;
       try {
-        const res = await fetchImpl(url);
-        if (!res.ok) return;
+        res = await fetchBabaSource("index", url, fetchImpl, colo);
+      } catch {
+        // ページが無い場合（開催数が少ない等）はスキップ
+        return;
+      }
+      if (!res.ok) return;
+      try {
         const info = parseCourseInfo(await decodeShiftJis(res));
         if (info?.venueCode) map.set(info.venueCode, info);
       } catch {
