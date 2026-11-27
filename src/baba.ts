@@ -223,6 +223,15 @@ const decodeShiftJis = async (res: Response) =>
 /** Workers Logs で絞る。1 行 JSON の event。cushion / moist は console.error、index は console.warn。 */
 export const BABA_FETCH_FAILED_EVENT = "baba_fetch_failed";
 
+/** 馬場取得が成功したときの 1 行。console.log。 */
+export const BABA_FETCH_OK_EVENT = "baba_fetch_ok";
+
+/** 外向き fetch が出た拠点。本文の IP はログに出さない。 */
+export const TRACE_URL = "https://www.cloudflare.com/cdn-cgi/trace";
+
+const TRACE_TIMEOUT_MS = 2000;
+const TRACE_BODY_LIMIT = 4096;
+
 const BABA_FETCH_LOG_BODY_LIMIT = 2048;
 
 const BABA_FETCH_LOG_HEADERS = [
@@ -248,12 +257,132 @@ function errorMessage(error: unknown): string {
 /**
  * 受信リクエストの cf.colo。Request が無い経路（Cron など）では null。
  * cf は IncomingRequestCfProperties と RequestInitCfProperties の共用なので、colo があるときだけ読む。
+ * これはリクエストが入った拠点であり、placement 後の実行拠点とは限らない。
  */
 export function requestColo(req: { cf?: unknown } | null | undefined): string | null {
   const cf = req?.cf;
   if (!cf || typeof cf !== "object") return null;
   const colo = (cf as { colo?: unknown }).colo;
   return typeof colo === "string" && colo.length > 0 ? colo : null;
+}
+
+/** IATA 3 文字だけを通す。ヘッダー経由の値をログに出す前に使う。 */
+export function normalizeAirportCode(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const code = value.trim().toUpperCase();
+  return /^[A-Z]{3}$/.test(code) ? code : null;
+}
+
+/**
+ * JRA へ取りに行った側の拠点。
+ * colo はログの colo（trace の colo。無ければ request.cf.colo）。
+ * requestColo は request.cf.colo。入った拠点で、placement 後の実行拠点とは限らない。
+ * egressColo / loc は cdn-cgi/trace。placement はリクエストの cf-placement。付かないときは null。
+ */
+export interface BabaColoInfo {
+  colo: string | null;
+  requestColo: string | null;
+  egressColo: string | null;
+  loc: string | null;
+  placement: string | null;
+}
+
+export type BabaColoArg = string | BabaColoInfo | null;
+
+function coloLogFields(colo: BabaColoArg | undefined): Record<string, string | null> {
+  if (typeof colo === "object" && colo) {
+    return {
+      colo: colo.colo,
+      requestColo: colo.requestColo,
+      egressColo: colo.egressColo,
+      loc: colo.loc,
+      placement: colo.placement,
+    };
+  }
+  return { colo: colo ?? null };
+}
+
+export function parseTraceBody(text: string): { egressColo: string | null; loc: string | null } {
+  let egressColo: string | null = null;
+  let loc: string | null = null;
+  for (const line of text.split(/\r?\n/)) {
+    const eq = line.indexOf("=");
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq);
+    const value = line.slice(eq + 1).trim();
+    if (key === "colo") egressColo = normalizeAirportCode(value);
+    if (key === "loc" && /^[A-Za-z]{2}$/.test(value)) loc = value.toUpperCase();
+  }
+  return { egressColo, loc };
+}
+
+/** この Worker の外向き fetch が出た拠点。失敗しても JRA 取得は続ける。 */
+export async function readEgressLocation(
+  fetchImpl: FetchLike
+): Promise<{ egressColo: string | null; loc: string | null }> {
+  try {
+    const signal = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+      ? AbortSignal.timeout(TRACE_TIMEOUT_MS)
+      : undefined;
+    const res = await fetchImpl(TRACE_URL, { cache: "no-store", signal });
+    if (!res.ok) return { egressColo: null, loc: null };
+    const text = await res.text();
+    if (text.length > TRACE_BODY_LIMIT) return { egressColo: null, loc: null };
+    return parseTraceBody(text);
+  } catch {
+    return { egressColo: null, loc: null };
+  }
+}
+
+function safePlacement(value: string | null): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  return /^[A-Za-z0-9_-]{1,32}$/.test(trimmed) ? trimmed : null;
+}
+
+export async function resolveBabaColo(
+  req: { cf?: unknown; headers?: { get(name: string): string | null } } | null | undefined,
+  fetchImpl: FetchLike = fetch
+): Promise<BabaColoInfo> {
+  const requestColoValue = requestColo(req);
+  const { egressColo, loc } = await readEgressLocation(fetchImpl);
+  return {
+    colo: egressColo ?? requestColoValue,
+    requestColo: requestColoValue,
+    egressColo,
+    loc,
+    placement: safePlacement(req?.headers?.get("cf-placement") ?? null),
+  };
+}
+
+export function logBabaFetchOk(info: BabaColoInfo, venues: number, courses: number): void {
+  try {
+    console.log(
+      JSON.stringify({
+        event: BABA_FETCH_OK_EVENT,
+        ...info,
+        venues,
+        courses,
+        timestamp: new Date().toISOString(),
+      })
+    );
+  } catch {
+    // ログ出力の失敗で取得結果は変えない
+  }
+}
+
+/** クッション・含水率とコース情報。成功時に baba_fetch_ok を 1 行出す。 */
+export async function fetchBabaAndCourse(
+  fetchImpl: FetchLike = fetch,
+  req: { cf?: unknown; headers?: { get(name: string): string | null } } | null = null
+): Promise<{ venues: VenueBaba[]; courseByVenue: Map<string, CourseInfo> }> {
+  const colo = await resolveBabaColo(req, fetchImpl);
+  const [venues, courseByVenue] = await Promise.all([
+    fetchBaba(fetchImpl, colo),
+    fetchCourseInfoByVenue(fetchImpl, colo),
+  ]);
+  logBabaFetchOk(colo, venues.length, courseByVenue.size);
+  return { venues, courseByVenue };
 }
 
 /** 調査に使う応答ヘッダー。set-cookie は値を出さず有無だけ。 */
@@ -320,7 +449,7 @@ async function fetchBabaSource(
   target: BabaFetchTarget,
   url: string,
   fetchImpl: FetchLike,
-  colo: string | null
+  colo: BabaColoArg
 ): Promise<Response> {
   const level = target === "index" ? "warn" : "error";
   let res: Response;
@@ -332,7 +461,7 @@ async function fetchBabaSource(
         target,
         url,
         error: errorMessage(error),
-        colo,
+        ...coloLogFields(colo),
       },
       level
     );
@@ -351,7 +480,7 @@ async function fetchBabaSource(
         bodyLength: prefix.bodyLength,
         bodyTruncated: prefix.bodyTruncated,
         ...(prefix.bodyReadError ? { bodyReadError: prefix.bodyReadError } : {}),
-        colo,
+        ...coloLogFields(colo),
       },
       level
     );
@@ -361,9 +490,9 @@ async function fetchBabaSource(
 
 /**
  * JRA から馬場データを取得・パースする。取得失敗時は例外を投げる。
- * colo は受信リクエストの cf.colo。失敗ログにだけ使い、取得処理自体は変えない。
+ * colo は失敗ログにだけ使い、取得処理自体は変えない。リクエストヘッダーは足さない。
  */
-export async function fetchBaba(fetchImpl: FetchLike = fetch, colo: string | null = null): Promise<VenueBaba[]> {
+export async function fetchBaba(fetchImpl: FetchLike = fetch, colo: BabaColoArg = null): Promise<VenueBaba[]> {
   const [cushionRes, moistRes] = await Promise.all([
     fetchBabaSource("cushion", CUSHION_URL, fetchImpl, colo),
     fetchBabaSource("moist", MOIST_URL, fetchImpl, colo),
@@ -445,7 +574,7 @@ export function parseCourseInfo(html: string): CourseInfo | null {
  */
 export async function fetchCourseInfoByVenue(
   fetchImpl: FetchLike = fetch,
-  colo: string | null = null
+  colo: BabaColoArg = null
 ): Promise<Map<string, CourseInfo>> {
   const map = new Map<string, CourseInfo>();
   await Promise.all(

@@ -221,7 +221,15 @@ curl -H "Authorization: Bearer $PREDICT_SECRET" \
 
 ## 馬場状態（クッション値・含水率）
 
-`/run` および Cron 投入時に、JRA 公式の馬場情報を取得して**対象場の分だけを `remarks`（備考欄）に追記**します。設定は不要（常時有効）で、予測ロジック自体は Dify 側なので、備考欄のテキストを読んで予想に反映してください。取得に失敗しても投入は止めず、その回だけ馬場情報なしで送ります。
+`/run` および Cron 投入時に、JRA 公式の馬場情報を取得して**対象場の分だけを `remarks`（備考欄）に追記**します。設定は不要（常時有効）で、予測ロジック自体は Dify 側なので、備考欄のテキストを読んで予想に反映してください。取得に失敗しても投入は止めず、その回だけ馬場情報なしで送ります。取れないときは `/baba/latest` もこれまでどおり `502` です。保存した古い値では返しません。
+
+### 実行場所
+
+`wrangler.jsonc` の `placement.region` は `aws:ap-northeast-1` です。fetch ハンドラ（`/baba`、`/baba/latest`、`/run`、`/kick`、`/verify`、`/seed` など）は、AWS 東京に最も近い Cloudflare 拠点で動きます。Worker は AWS の中では動きません。URL と返す JSON の形は変えていません。
+
+[Placement](https://developers.cloudflare.com/workers/configuration/placement/) は fetch ハンドラにだけ効きます。Cron の `scheduled` が行う馬場取得と各場 1R の検証、queue が行う Dify 呼び出しは、この指定では移動しません。Cron の馬場取得は失敗しても投入を止めないままです。queue は JRA を取りません。
+
+ローカルの `npm run dev` は placement を再現しないので、JRA への接続元はそのマシンです。
 
 `remarks` の例:
 
@@ -336,7 +344,7 @@ curl "https://jra-dify-pipeline.hdsk.workers.dev/baba?date=2026-09-13"
 
 ## Cloudflare へのデプロイ
 
-GitHub の `main` にマージすると、Cloudflare が Worker を自動デプロイします（Workers Builds / Git 連携）。普段の反映は PR を `main` に入れるだけで十分です。`npm run deploy` は手元から出すときの手動手段です。シークレット（`wrangler secret put`）はデプロイでは上書きされないので、キーの追加・変更だけ別途必要です。
+GitHub の `main` にマージすると、Cloudflare が Workers Builds でデプロイします。`placement` は `wrangler.jsonc` に書いてあるので、既定の `npx wrangler deploy` のまま反映されます。手元から出すときは `npm run deploy` です。シークレット（`wrangler secret put`）はデプロイでは上書きされないので、キーの追加・変更だけ別途必要です。
 
 初回セットアップの手順は公式の [Queues 入門](https://developers.cloudflare.com/queues/get-started/)、[Secrets](https://developers.cloudflare.com/workers/configuration/secrets/)、[Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/) に沿っています。`wrangler.jsonc` 側の producer / consumer / Cron 定義は済みです。
 
@@ -418,6 +426,8 @@ npm run deploy
 | Dify タイムアウト／切断 | `console.warn` | `Dify timeout\|disconnect (ack, no retry): ...` |
 | Dify リトライ対象失敗 | `console.error` | `Dify retryable failure: ...` |
 | Dify 最終失敗メール | `console.log` | `Notifying Dify failure for ...` |
+| 馬場取得の成功 | `console.log` | `baba_fetch_ok`。`colo` は外向き fetch の拠点（trace）。`requestColo` は `request.cf.colo`。`egressColo` / `loc` は trace。`placement` はリクエストの `cf-placement` |
+| 馬場取得の失敗 | `console.error` / `console.warn` | `baba_fetch_failed`。cushion / moist は error、index は warn。`status` に 403 など。拠点フィールドは成功時と同じ |
 
 `GET /` は馬柱 URL を 1 行ずつ返すプレーンテキストです。日付や場コードは本文に含みません。Queue にも載せません。
 
@@ -441,6 +451,38 @@ npx wrangler tail --status error
 4. **Issues（問題検出）** で例外・5xx・`console.error` のグルーピング（`observability.issues.enabled` 済み。有効化後の新規障害のみ）
 
 Cron の実行履歴は Worker の **Settings → Triggers** 付近の Cron Events（直近 100 件程度）でも見られます。
+
+馬場の取得拠点は **Workers & Pages → `jra-dify-pipeline` → Observability** で見ます。成功は `baba_fetch_ok`、失敗は `baba_fetch_failed` です。`egressColo` と `loc` で外向き fetch の拠点を見ます。`loc` が `JP` なら日本です。colo の例は `NRT`、`KIX`、`FUK`、`OKA` です。403 は失敗ログの `status` です。応答の `cf-placement`（例 `remote-NRT`）は、次のようにレスポンスヘッダーでも確認できます。
+
+```bash
+curl -sS -D- "https://jra-dify-pipeline.hdsk.workers.dev/baba/latest?venue=05" -o /dev/null
+```
+
+戻すときは `wrangler.jsonc` から `placement` を消して再デプロイするか、現行 version へ rollback します。
+
+```bash
+npx wrangler rollback 9c7ed61e-7b69-4b72-af2b-f9572ddf33b1
+```
+
+アカウント全体の [telemetry query](https://developers.cloudflare.com/api/resources/workers/subresources/observability/subresources/telemetry/methods/query/) では、`$metadata.service` と全文検索の `needle` を同時に指定します。
+
+```json
+{
+  "queryId": "baba-fetch-failed",
+  "view": "events",
+  "timeframe": { "from": 0, "to": 0 },
+  "parameters": {
+    "filterCombination": "and",
+    "filters": [
+      { "key": "$metadata.service", "operation": "eq", "type": "string", "value": "jra-dify-pipeline" }
+    ],
+    "needle": { "value": "baba_fetch_failed", "isRegex": false, "matchCase": false },
+    "limit": 50
+  }
+}
+```
+
+`timeframe.from` / `to` は Unix ミリ秒です。成功だけ見るときは `needle.value` を `baba_fetch_ok` にします。応答ヘッダーの `cf-placement` はログの `placement` に入っているときだけ検索できます。付いていないときは `egressColo` と `loc` を見ます。403 の有無は `baba_fetch_failed` の `status` です。
 
 ## 手動実行
 
